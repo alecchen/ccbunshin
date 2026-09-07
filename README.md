@@ -8,24 +8,13 @@ Each profile provides isolated settings such as the endpoint, model, hooks, and 
 
 ## Install
 
-For the published `v0.0.1` release, download the binary for the target platform:
-
-```sh
-curl -fsSL https://github.com/alecchen/ccbunshin/releases/download/v0.0.1/ccbunshin-linux-amd64 \
-  -o "$HOME/.local/bin/ccbunshin"
-chmod 755 "$HOME/.local/bin/ccbunshin"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Or use the installer:
+Use the installer for the published `v0.0.1` release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh | sh
 ```
 
-The installer detects Linux/macOS and amd64/arm64, then downloads the matching `v0.0.1` release asset. Set `CCBUNSHIN_VERSION` to install another release and `CCBUNSHIN_INSTALL_DIR` to change the destination.
-
-For a private repository, authenticate the download first or use an internal artifact mirror. Unauthenticated `raw.githubusercontent.com` requests cannot read a private repository.
+The installer detects Linux/macOS and amd64/arm64, then downloads the matching release asset. Set `CCBUNSHIN_VERSION` to install another release and `CCBUNSHIN_INSTALL_DIR` to change the destination. The repository is public, so no GitHub authentication is required.
 
 Run initialization once to create the profile directory:
 
