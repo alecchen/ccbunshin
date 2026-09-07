@@ -6,7 +6,7 @@ MIT licensed. See [LICENSE](LICENSE).
 
 ## Install
 
-Install the published `v0.0.1` release:
+Install the latest published release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh | sh
@@ -90,9 +90,9 @@ ccbunshin model provider1 claude-sonnet-4-5
 The proxy exposes one endpoint for the LeanCTX flow. Both profiles can point to it. The proxy reads the model in each request and uses the route rules in `examples/proxy.json`.
 
 ```text
-LeanCTX :5000 or :4444 -> ccbunshin :3456
-                              claude-* -> provider1
-                              qwen/deepseek/gpt-oss -> provider2
+ccbunshin :3456
+├── claude-*              -> provider1
+└── qwen/deepseek/gpt-oss -> provider2
 ```
 
 Start the proxy with:
