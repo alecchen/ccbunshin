@@ -1,22 +1,20 @@
 # ccbunshin
 
-**ccbunshin** (分身, *bunshin*, "shadow clone") runs multiple Claude Code configurations side by side. Each profile is a clone with isolated configuration and shared Claude Code state.
+**ccbunshin** (分身, *bunshin*, "shadow clone") runs several Claude Code profiles side by side. Each profile has its own settings, while Claude Code state stays shared.
 
 MIT licensed. See [LICENSE](LICENSE).
 
-Each profile provides isolated settings such as the endpoint, model, hooks, and telemetry environment. Claude Code state remains in the normal `~/.claude/` location.
-
 ## Install
 
-Use the installer for the published `v0.0.1` release:
+Install the published `v0.0.1` release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh | sh
 ```
 
-The installer detects Linux/macOS and amd64/arm64, then downloads the matching release asset. Set `CCBUNSHIN_VERSION` to install another release and `CCBUNSHIN_INSTALL_DIR` to change the destination. The repository is public, so no GitHub authentication is required.
+The installer picks the right binary for Linux or macOS on amd64 or arm64. Set `CCBUNSHIN_VERSION` to install another release, or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
 
-Run initialization once to create the profile directory:
+Initialize the profile directory:
 
 ```sh
 ccbunshin init
@@ -24,21 +22,23 @@ ccbunshin init
 
 ## Profiles
 
-Create a profile from the built-in scaffold:
+Create a profile:
 
 ```sh
 ccbunshin create provider1
 ```
 
-Create one from an example file:
+Create one from an example:
 
 ```sh
 ccbunshin create provider2 --from examples/provider2.json
 ```
 
-Profiles are stored in `~/.claude-profiles/<name>.json`. A profile may define authentication using Claude Code's native mechanisms, such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper`. Profile files contain secrets only when you intentionally configure per-profile authentication, so keep the directory private and permissions restricted to `700`/`600`.
+Profiles live in `~/.claude-profiles/<name>.json`. The directory uses mode `700`, and profile files use mode `600`.
 
-Example using a token from the profile environment:
+A profile can use Claude Code's normal authentication settings, including `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `apiKeyHelper`. If you put a token in a profile, protect that file. A local `apiKeyHelper` is usually a better choice than storing the token directly in JSON.
+
+Example profile:
 
 ```json
 {
@@ -51,8 +51,6 @@ Example using a token from the profile environment:
 }
 ```
 
-For better secret handling, use `apiKeyHelper` to call a local credential helper instead of writing the token directly into the profile. The ccbunshin proxy does not manage or store credentials; Claude Code supplies authentication using its normal settings and environment behavior.
-
 ## Commands
 
 ```text
@@ -62,7 +60,7 @@ ccbunshin launch <name> [claude args...]
 ccbunshin model <name> <model>
 ccbunshin list
 ccbunshin status <name>
-ccbunshin doctor [name]
+ccbunshin doctor <name>
 ccbunshin delete <name>
 ccbunshin proxy start
 ccbunshin proxy status
@@ -75,31 +73,42 @@ Launch a profile:
 ccbunshin launch provider1
 ```
 
-Update its model:
+This runs Claude Code with the profile settings file:
 
 ```sh
-ccbunshin model provider1 qwen3.8-27b
+claude --settings ~/.claude-profiles/provider1.json
 ```
 
-`launch` passes the profile settings file to Claude Code with `--settings`.
+Change the default model for future sessions:
 
-## Model-routed proxy
+```sh
+ccbunshin model provider1 claude-sonnet-4-5
+```
 
-The Go proxy exposes one endpoint for the LeanCTX-facing flow. Configure both profiles with the same proxy URL, then route requests by the model field using `examples/proxy.json`:
+## Model routing
+
+The proxy exposes one endpoint for the LeanCTX flow. Both profiles can point to it. The proxy reads the model in each request and uses the route rules in `examples/proxy.json`.
 
 ```text
-LeanCTX :5000 or :4444 -> ccbunshin proxy :3456
+LeanCTX :5000 or :4444 -> ccbunshin :3456
                               claude-* -> provider1
                               qwen/deepseek/gpt-oss -> provider2
 ```
 
-Set `CCBUNSHIN_PROXY_CONFIG` to the route config. Route patterns without `*` are exact matches; patterns such as `claude-*` use glob matching. Provider URLs and model mappings are configurable in JSON. Authentication remains in Claude Code settings or environment; it is not stored in the proxy config. See `cmd/ccbunshin/README.md`.
+Start the proxy with:
 
-## Per-profile model mappings
+```sh
+export CCBUNSHIN_PROXY_CONFIG=/path/to/proxy.json
+ccbunshin proxy start
+```
 
-Both profiles can use the same Claude Code alias, while resolving that alias to different concrete models before the request reaches the shared proxy. Define Claude Code's model override variables inside each profile's `env` block.
+A route without `*` matches one exact model. A route such as `claude-*` matches models with that prefix. Provider URLs and model rewrites belong in the JSON config. Authentication stays in Claude Code settings and environment variables, not in the proxy config.
 
-Provider1 profile:
+### Different mappings per profile
+
+Claude Code can resolve the same alias to different concrete model IDs in each profile.
+
+Provider1:
 
 ```json
 {
@@ -114,7 +123,7 @@ Provider1 profile:
 }
 ```
 
-Provider2 profile:
+Provider2:
 
 ```json
 {
@@ -129,58 +138,43 @@ Provider2 profile:
 }
 ```
 
-Start both sessions with the same alias:
+Run both sessions with the same alias:
 
 ```sh
-# Terminal 1: sonnet resolves to claude-sonnet-4-5
 ccbunshin launch provider1
-
-# Terminal 2: sonnet resolves to qwen-3.8-27b
 ccbunshin launch provider2
 ```
 
-The shared proxy receives the resolved model IDs and routes them using `examples/proxy.json`:
-
-```text
-provider1: sonnet -> claude-sonnet-4-5 -> provider1
-provider2: sonnet -> qwen-3.8-27b     -> provider2
-```
-
-This avoids needing a profile header or separate proxy port. The model override variables are Claude Code settings, not ccbunshin-specific variables. Verify the exact variable names against the Claude Code version being used.
-
+The first session sends `claude-sonnet-4-5`. The second sends `qwen-3.8-27b`. The proxy routes those concrete model IDs to different providers.
 
 ## Build and verify
 
-The proxy is compiled for the target operating system and architecture. Go's cross-compilation variables let you build a Linux binary from macOS without running it locally:
+Build for the current machine:
 
 ```sh
-# Build for the current machine
 go -C cmd/ccbunshin build -o ccbunshin
-
-# Linux x86_64
-env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-  go -C cmd/ccbunshin build -o ccbunshin-linux-amd64
-
-# Linux ARM64
-env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-  go -C cmd/ccbunshin build -o ccbunshin-linux-arm64
 ```
 
-Check the Linux host architecture with `uname -m`:
+Build Linux binaries from macOS:
+
+```sh
+env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+  go -C cmd/ccbunshin build -trimpath -ldflags='-s -w' \
+  -o ccbunshin-linux-amd64
+
+env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+  go -C cmd/ccbunshin build -trimpath -ldflags='-s -w' \
+  -o ccbunshin-linux-arm64
+```
+
+The architecture names are:
 
 ```text
-x86_64  -> GOARCH=amd64
-aarch64 -> GOARCH=arm64
+x86_64  -> amd64
+aarch64 -> arm64
 ```
 
-Copy the matching binary to the Linux host:
-
-```sh
-scp ccbunshin-linux-amd64 user@linux-host:/usr/local/bin/ccbunshin
-ssh user@linux-host 'chmod 755 /usr/local/bin/ccbunshin'
-```
-
-On Linux, `docs/systemd/ccbunshin-proxy.service` is an optional alternative to `ccbunshin proxy start|stop|status` when the proxy should start at boot and restart after crashes.
+Run the Go checks:
 
 ```sh
 gofmt -w cmd/ccbunshin/*.go
@@ -188,10 +182,12 @@ go -C cmd/ccbunshin vet ./...
 go -C cmd/ccbunshin test ./...
 ```
 
+On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at boot with automatic restarts. For a user-local process, use `ccbunshin proxy start`, `status`, and `stop`.
 
-- `cmd/ccbunshin/` - unified Go CLI and model-routed proxy
-- `examples/` - sample profile settings
-- `docs/` - architecture and implementation documents
-- `tests/` - reserved for future integration tests (the Go test suite is under `cmd/ccbunshin/`)
+## Repository layout
 
-See `docs/CCBUNSHIN_IMPLEMENTATION.md` for the full implementation specification.
+- `cmd/ccbunshin/` contains the Go CLI and model-routed proxy.
+- `examples/` contains profile and proxy config examples.
+- `docs/` contains architecture and deployment notes.
+
+See [cmd/ccbunshin/README.md](cmd/ccbunshin/README.md) for command and proxy details.
