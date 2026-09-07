@@ -64,6 +64,21 @@ Implemented as a Go CLI in `cmd/ccbunshin` (no longer spec-only). The model-rout
 and the project-aware `claude` shell integration (bash/zsh/tcsh) are included. Releases are
 tagged `v0.0.x`; pushing a `v*` tag triggers the GitHub Actions build-and-release workflow.
 
+## Releasing
+
+Cutting a release `vX.Y.Z`:
+
+1. Bump the default in `install.sh`
+   (`version="${CCBUNSHIN_VERSION:-vX.Y.Z}"`) in the same commit you will tag. The CI
+   `version-check` job fails any `v*` tag whose `install.sh` default does not match the tag,
+   and the `release` job depends on it, so the installer and published binaries cannot drift.
+2. Tag and push:
+   `git tag -a vX.Y.Z -m "..." && git push origin main && git push origin vX.Y.Z`
+3. If `version-check` fails, fix `install.sh`, commit the fix, and re-tag the fixed commit.
+
+Darwin assets are published on every tag, so macOS installs via `install.sh` resolve once a
+tag exists.
+
 ## Verification requirement
 
 Every implementation change must include a way to verify the behavior. Add or update automated tests where practical, and document the verification command in the relevant README or implementation document. At minimum, run the validation appropriate to the changed code before declaring the work complete.
