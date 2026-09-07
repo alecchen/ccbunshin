@@ -2,7 +2,7 @@
 set -eu
 
 repo="${CCBUNSHIN_REPO:-alecchen/ccbunshin}"
-version="${CCBUNSHIN_VERSION:-v0.0.2}"
+version="${CCBUNSHIN_VERSION:-v0.0.3}"
 prefix="${CCBUNSHIN_INSTALL_DIR:-$HOME/.local/bin}"
 
 case "$(uname -s):$(uname -m)" in
