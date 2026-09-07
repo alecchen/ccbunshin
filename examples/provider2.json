@@ -1,0 +1,7 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3457"
+  },
+  "hooks": {},
+  "model": "provider2-model"
+}
