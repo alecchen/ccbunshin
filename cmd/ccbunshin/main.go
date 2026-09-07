@@ -423,7 +423,14 @@ func listProfiles() error {
 	return nil
 }
 
-func initCLI() error { return os.MkdirAll(profilesDir(), 0700) }
+func initCLI() error {
+	dir := profilesDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	fmt.Printf("Initialized profile directory: %s\n", dir)
+	return nil
+}
 func deleteProfile(name string) error {
 	file, err := profilePath(name)
 	if err != nil {

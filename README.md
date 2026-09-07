@@ -14,10 +14,11 @@ curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh 
 
 The installer picks the right binary for Linux or macOS on amd64 or arm64. Set `CCBUNSHIN_VERSION` to install another release, or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
 
-Initialize the profile directory:
+Initialize the profile directory. This creates `~/.claude-profiles/` if needed and prints the directory path:
 
 ```sh
 ccbunshin init
+# Initialized profile directory: /Users/you/.claude-profiles
 ```
 
 ## Profiles
