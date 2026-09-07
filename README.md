@@ -83,7 +83,7 @@ ccbunshin model provider1 qwen3.8-27b
 
 `launch` passes the profile settings file to Claude Code with `--settings`.
 
-## Phase 2 proxy
+## Model-routed proxy
 
 The Go proxy exposes one endpoint for the LeanCTX-facing flow. Configure both profiles with the same proxy URL, then route requests by the model field using `examples/proxy.json`:
 
@@ -93,16 +93,7 @@ LeanCTX :5000 or :4444 -> ccbunshin proxy :3456
                               qwen/deepseek/gpt-oss -> provider2
 ```
 
-Set `CCBUNSHIN_PROXY_CONFIG` to the route config. Route patterns without `*` are exact matches; patterns such as `claude-*` use glob matching. Provider URLs and model mappings are configurable in JSON. Authentication remains in Claude Code settings or environment; it is not stored in the proxy config. See `proxy/README.md`.
-
-
-Run the shell test suite and ShellCheck:
-
-```sh
-shellcheck ccbunshin tests/test_ccbunshin.sh
-bash -n ccbunshin
-tests/test_ccbunshin.sh
-```
+Set `CCBUNSHIN_PROXY_CONFIG` to the route config. Route patterns without `*` are exact matches; patterns such as `claude-*` use glob matching. Provider URLs and model mappings are configurable in JSON. Authentication remains in Claude Code settings or environment; it is not stored in the proxy config. See `cmd/ccbunshin/README.md`.
 
 ## Per-profile model mappings
 
@@ -158,6 +149,8 @@ provider2: sonnet -> qwen-3.8-27b     -> provider2
 This avoids needing a profile header or separate proxy port. The model override variables are Claude Code settings, not ccbunshin-specific variables. Verify the exact variable names against the Claude Code version being used.
 
 
+## Build and verify
+
 The proxy is compiled for the target operating system and architecture. Go's cross-compilation variables let you build a Linux binary from macOS without running it locally:
 
 ```sh
@@ -180,16 +173,14 @@ x86_64  -> GOARCH=amd64
 aarch64 -> GOARCH=arm64
 ```
 
-Copy the matching binary to the Linux host, then configure and run it:
+Copy the matching binary to the Linux host:
 
 ```sh
-scp ccbunshin-proxy-linux-amd64 user@linux-host:/usr/local/bin/ccbunshin-proxy
-export CCBUNSHIN_PROXY_CONFIG=/etc/ccbunshin/proxy.json
-/usr/local/bin/ccbunshin-proxy
+scp ccbunshin-linux-amd64 user@linux-host:/usr/local/bin/ccbunshin
+ssh user@linux-host 'chmod 755 /usr/local/bin/ccbunshin'
 ```
 
 On Linux, `docs/systemd/ccbunshin-proxy.service` is an optional alternative to `ccbunshin proxy start|stop|status` when the proxy should start at boot and restart after crashes.
-
 
 ```sh
 gofmt -w cmd/ccbunshin/*.go
@@ -201,6 +192,6 @@ go -C cmd/ccbunshin test ./...
 - `cmd/ccbunshin/` - unified Go CLI and model-routed proxy
 - `examples/` - sample profile settings
 - `docs/` - architecture and implementation documents
-- `tests/` - legacy shell test location (the Go test suite is under `cmd/ccbunshin/`)
+- `tests/` - reserved for future integration tests (the Go test suite is under `cmd/ccbunshin/`)
 
 See `docs/CCBUNSHIN_IMPLEMENTATION.md` for the full implementation specification.
