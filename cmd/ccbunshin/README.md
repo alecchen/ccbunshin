@@ -69,7 +69,20 @@ The lifecycle commands keep the PID and log files under:
 
 Authentication is not stored in the proxy config. Claude Code's native `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper` mechanisms remain responsible for credentials.
 
-## Verification
+## systemd alternative
+
+On Linux, systemd can manage the proxy instead of `ccbunshin proxy start|stop|status`. Install the binary at `/usr/local/bin/ccbunshin`, copy `docs/systemd/ccbunshin-proxy.service` to `/etc/systemd/system/`, and adjust the config path if needed:
+
+```sh
+sudo install -m 755 ccbunshin /usr/local/bin/ccbunshin
+sudo install -m 644 docs/systemd/ccbunshin-proxy.service /etc/systemd/system/ccbunshin-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ccbunshin-proxy
+sudo systemctl status ccbunshin-proxy
+```
+
+The service runs the unified binary in internal server mode and reads `/etc/ccbunshin/proxy.json`. Use the built-in lifecycle commands for user-local deployments; use systemd for boot startup and crash restarts.
+
 
 ```sh
 gofmt -w cmd/ccbunshin/*.go

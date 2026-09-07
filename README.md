@@ -188,7 +188,8 @@ export CCBUNSHIN_PROXY_CONFIG=/etc/ccbunshin/proxy.json
 /usr/local/bin/ccbunshin-proxy
 ```
 
-Run proxy validation from the repository root:
+On Linux, `docs/systemd/ccbunshin-proxy.service` is an optional alternative to `ccbunshin proxy start|stop|status` when the proxy should start at boot and restart after crashes.
+
 
 ```sh
 gofmt -w cmd/ccbunshin/*.go

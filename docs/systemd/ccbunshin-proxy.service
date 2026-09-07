@@ -1,11 +1,16 @@
 [Unit]
 Description=ccbunshin model-routed proxy
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/ccbunshin-proxy
-EnvironmentFile=/etc/ccbunshin/proxy.env
+Type=simple
+ExecStart=/usr/local/bin/ccbunshin proxy --server
+Environment=CCBUNSHIN_PROXY_CONFIG=/etc/ccbunshin/proxy.json
 Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
