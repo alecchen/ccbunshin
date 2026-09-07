@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -98,5 +100,56 @@ func TestHealthz(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy.test/healthz", nil))
 	if response.Code != http.StatusOK || response.Body.String() != "ok\n" {
 		t.Fatalf("health response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestFindLocalProfileWalksParents(t *testing.T) {
+	root := t.TempDir()
+	nested := root + "/nested/child"
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localProfilePath(root), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name, file, err := findLocalProfile(nested)
+	if err != nil || name != "paid" || file != localProfilePath(root) {
+		t.Fatalf("findLocalProfile() = %q, %q, %v", name, file, err)
+	}
+}
+
+func TestLocalProfileCommands(t *testing.T) {
+	root := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	if err := setLocalProfile("paid"); err != nil {
+		t.Fatal(err)
+	}
+	name, _, err := findLocalProfile(root)
+	if err != nil || name != "paid" {
+		t.Fatalf("local profile = %q, %v", name, err)
+	}
+	if err := unsetLocalProfile(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findLocalProfile(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("findLocalProfile after unset = %v", err)
+	}
+}
+
+func TestReadLocalProfileRejectsMultipleLines(t *testing.T) {
+	file := t.TempDir() + "/" + localProfileFile
+	if err := os.WriteFile(file, []byte("paid\nfree\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLocalProfile(file); err == nil {
+		t.Fatal("readLocalProfile accepted multiple lines")
 	}
 }

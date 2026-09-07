@@ -255,6 +255,104 @@ func profilePath(name string) (string, error) {
 	}
 	return path.Join(profilesDir(), name+".json"), nil
 }
+
+const localProfileFile = ".ccbunshin-profile"
+
+func localProfilePath(dir string) string { return path.Join(dir, localProfileFile) }
+
+func readLocalProfile(file string) (string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" || strings.ContainsAny(name, "\r\n") {
+		return "", fmt.Errorf("invalid local profile in %s", file)
+	}
+	if _, err := profilePath(name); err != nil {
+		return "", fmt.Errorf("invalid local profile in %s: %w", file, err)
+	}
+	return name, nil
+}
+
+func findLocalProfile(dir string) (string, string, error) {
+	for {
+		file := localProfilePath(dir)
+		name, err := readLocalProfile(file)
+		if err == nil {
+			return name, file, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", "", err
+		}
+		parent := path.Dir(dir)
+		if parent == dir {
+			return "", "", os.ErrNotExist
+		}
+		dir = parent
+	}
+}
+
+func setLocalProfile(name string) error {
+	if _, err := profilePath(name); err != nil {
+		return err
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(localProfilePath(dir), []byte(name+"\n"), 0600)
+}
+
+func unsetLocalProfile() error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	err = os.Remove(localProfilePath(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func localCLI(args []string) error {
+	if len(args) == 0 {
+		dir, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		name, file, err := findLocalProfile(dir)
+		if err != nil {
+			return fmt.Errorf("no local profile found")
+		}
+		fmt.Printf("profile: %s\nsource: %s\n", name, file)
+		return nil
+	}
+	if len(args) == 1 && args[0] == "--unset" {
+		return unsetLocalProfile()
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("local requires a profile or --unset")
+	}
+	return setLocalProfile(args[0])
+}
+
+func resolveLaunch(args []string) (string, []string, error) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:], nil
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", nil, err
+	}
+	name, _, err := findLocalProfile(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("launch requires a profile or local .ccbunshin-profile")
+	}
+	return name, args, nil
+}
+
 func proxyStateDir() string { return path.Join(home(), ".cache", "ccbunshin") }
 func proxyConfigPath() string {
 	if value := os.Getenv("CCBUNSHIN_PROXY_CONFIG"); value != "" {
@@ -491,17 +589,20 @@ func main() {
 	}
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Println("usage: ccbunshin <init|create|launch|model|list|status|doctor|delete|uninstall|proxy>")
+		fmt.Println("usage: ccbunshin <init|create|launch|local|model|list|status|doctor|delete|uninstall|proxy>")
 		return
 	}
 	var err error
 	switch args[0] {
 	case "launch":
-		if len(args) < 2 {
-			err = fmt.Errorf("launch requires a profile")
+		name, claudeArgs, resolveErr := resolveLaunch(args[1:])
+		if resolveErr != nil {
+			err = resolveErr
 		} else {
-			err = launchProfile(args[1], args[2:])
+			err = launchProfile(name, claudeArgs)
 		}
+	case "local":
+		err = localCLI(args[1:])
 	case "init":
 		err = initCLI()
 	case "create":

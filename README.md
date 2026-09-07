@@ -56,7 +56,8 @@ Example profile:
 ```text
 ccbunshin init
 ccbunshin create <name> [--from <file>] [--force]
-ccbunshin launch <name> [claude args...]
+ccbunshin local [<name>|--unset]
+ccbunshin launch [<name>] [claude args...]
 ccbunshin model <name> <model>
 ccbunshin list
 ccbunshin status <name>
@@ -67,11 +68,27 @@ ccbunshin proxy status
 ccbunshin proxy stop
 ```
 
-Launch a profile:
+Launch a profile explicitly:
 
 ```sh
 ccbunshin launch provider1
 ```
+
+Or select a default profile for the current directory and its descendants:
+
+```sh
+ccbunshin local provider1
+ccbunshin launch
+```
+
+This writes `.ccbunshin-profile` in the current directory. `ccbunshin launch` searches the current directory and then its parents. An explicit profile takes precedence over the local file. Inspect or clear the current local selection with:
+
+```sh
+ccbunshin local
+ccbunshin local --unset
+```
+
+The lookup is performed by the executable, so this works unchanged from Bash, zsh, tcsh, and other shells.
 
 This runs Claude Code with the profile settings file:
 

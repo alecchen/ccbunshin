@@ -93,8 +93,7 @@ claude-free  =  ccbunshin launch free  =  claude --settings ~/.claude-profiles/f
 claude-paid  =  ccbunshin launch paid  =  claude --settings ~/.claude-profiles/paid.json
 ```
 
-Each launch names its profile explicitly. There is no global "active profile" state, so two
-profiles run simultaneously, in the same repository, without interference.
+Each launch may name its profile explicitly, or use the nearest `.ccbunshin-profile` marker in the current directory or a parent. Explicit names take precedence. There is no global active profile state, so two profiles run simultaneously, in the same repository, without interference.
 
 ## 4. Isolation map
 
@@ -115,7 +114,8 @@ profiles run simultaneously, in the same repository, without interference.
 ```text
 ccbunshin init                        one-time: create ~/.claude-profiles/, install wrappers
 ccbunshin create <name> [--from <file>]  scaffold a profile settings file from a template
-ccbunshin launch <name> [args...]     claude --settings <file> "$@"
+ccbunshin launch [<name>] [args...]  claude --settings <file> "$@"
+ccbunshin local [<name>|--unset]       set, show, or clear the directory-local profile
 ccbunshin model <name> <model>        set the profile's default model
 ccbunshin list                        list profiles and the keys each covers
 ccbunshin status <name>               show profile file, diff vs global baseline
