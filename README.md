@@ -12,7 +12,7 @@ Install the latest published release:
 curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh | sh
 ```
 
-The installer picks the right binary for Linux or macOS on amd64 or arm64. Set `CCBUNSHIN_VERSION` to install another release, or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
+The installer downloads the newest GitHub release for Linux or macOS on amd64 or arm64, so publishing a release needs no installer change. Set `CCBUNSHIN_VERSION` to pin a specific release (for example `CCBUNSHIN_VERSION=v0.0.3 sh install.sh`), or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
 
 Initialize the profile directory. This creates `~/.claude-profiles/` if needed and prints the directory path:
 
@@ -221,6 +221,7 @@ gofmt -w cmd/ccbunshin/*.go
 go -C cmd/ccbunshin vet ./...
 go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh
+sh tests/install-test.sh
 ```
 
 On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at boot with automatic restarts. For a user-local process, use `ccbunshin proxy start`, `status`, and `stop`.

@@ -2,7 +2,7 @@
 set -eu
 
 repo="${CCBUNSHIN_REPO:-alecchen/ccbunshin}"
-version="${CCBUNSHIN_VERSION:-v0.0.3}"
+version="${CCBUNSHIN_VERSION:-}"
 prefix="${CCBUNSHIN_INSTALL_DIR:-$HOME/.local/bin}"
 
 case "$(uname -s):$(uname -m)" in
@@ -13,7 +13,14 @@ case "$(uname -s):$(uname -m)" in
   *) echo "unsupported platform: $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 
-url="https://github.com/$repo/releases/download/$version/$asset"
+# Without CCBUNSHIN_VERSION the stable "latest" endpoint always resolves to the
+# newest GitHub Release, so cutting a release needs no change to this script.
+if [ -n "$version" ]; then
+  url="https://github.com/$repo/releases/download/$version/$asset"
+else
+  url="https://github.com/$repo/releases/latest/download/$asset"
+fi
+
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
