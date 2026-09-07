@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +152,130 @@ func TestReadLocalProfileRejectsMultipleLines(t *testing.T) {
 	}
 	if _, err := readLocalProfile(file); err == nil {
 		t.Fatal("readLocalProfile accepted multiple lines")
+	}
+}
+
+func chdirT(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+}
+
+func sameArgs(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestResolveLaunchExplicitName(t *testing.T) {
+	name, claudeArgs, err := resolveLaunch([]string{"provider1", "-p", "hello"})
+	if err != nil || name != "provider1" {
+		t.Fatalf("resolveLaunch() = %q, %v", name, err)
+	}
+	if !sameArgs(claudeArgs, []string{"-p", "hello"}) {
+		t.Fatalf("claude args = %q", claudeArgs)
+	}
+}
+
+func TestResolveLaunchDashFirstUsesLocal(t *testing.T) {
+	root := t.TempDir()
+	chdirT(t, root)
+	if err := os.WriteFile(localProfilePath(root), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name, claudeArgs, err := resolveLaunch([]string{"-p", "hello world", "--settings", "foo.json"})
+	if err != nil || name != "paid" {
+		t.Fatalf("resolveLaunch() = %q, %v", name, err)
+	}
+	if !sameArgs(claudeArgs, []string{"-p", "hello world", "--settings", "foo.json"}) {
+		t.Fatalf("claude args = %q", claudeArgs)
+	}
+}
+
+func TestResolveLaunchNoNameNoMarkerFails(t *testing.T) {
+	chdirT(t, t.TempDir())
+	if _, _, err := resolveLaunch([]string{"-p", "hi"}); err == nil {
+		t.Fatal("resolveLaunch accepted dash args without a local profile")
+	}
+	if _, _, err := resolveLaunch(nil); err == nil {
+		t.Fatal("resolveLaunch accepted no args without a local profile")
+	}
+}
+
+func TestResolveLaunchNoArgsUsesLocal(t *testing.T) {
+	root := t.TempDir()
+	chdirT(t, root)
+	if err := os.WriteFile(localProfilePath(root), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name, claudeArgs, err := resolveLaunch(nil)
+	if err != nil || name != "paid" || len(claudeArgs) != 0 {
+		t.Fatalf("resolveLaunch() = %q, %q, %v", name, claudeArgs, err)
+	}
+}
+
+func TestBuildClaudeCommandForwardsArgs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	file := filepath.Join(dir, "provider1.json")
+	if err := os.WriteFile(file, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	forwarded := []string{"-p", "hello world", "", "--resume", "abc", "--settings", "foo.json", "--unknown-future-option", "value"}
+	command, err := buildClaudeCommand("provider1", forwarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string{"claude", "--settings", file}, forwarded...)
+	if !sameArgs(command.Args, want) {
+		t.Fatalf("argv = %q", command.Args)
+	}
+}
+
+func TestResolveProvider(t *testing.T) {
+	root := t.TempDir()
+	marker := func(dir, name string) {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localProfilePath(dir), []byte(name+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proj := filepath.Join(root, "proj")
+	marker(proj, "provider1")
+	nested := filepath.Join(proj, "a", "b")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker(filepath.Join(nested, "nested"), "provider2")
+
+	cases := []struct {
+		dir  string
+		want string
+	}{
+		{proj, "provider1"},
+		{nested, "provider1"},                                  // marker several levels above
+		{filepath.Join(proj, "a", "b", "c"), "provider1"},      // deep child
+		{filepath.Join(nested, "nested"), "provider2"},         // nearest wins
+		{filepath.Join(nested, "nested", "deep"), "provider2"}, // inside nested project
+		{filepath.Join(root, "plain"), ""},                     // no profile
+	}
+	for _, tc := range cases {
+		if got := resolveProvider(tc.dir); got != tc.want {
+			t.Errorf("resolveProvider(%s) = %q, want %q", tc.dir, got, tc.want)
+		}
 	}
 }

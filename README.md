@@ -55,7 +55,7 @@ Example profile:
 ## Commands
 
 ```text
-ccbunshin init
+ccbunshin init [bash|zsh|tcsh]
 ccbunshin create <name> [--from <file>] [--force]
 ccbunshin local [<name>|--unset]
 ccbunshin launch [<name>] [claude args...]
@@ -102,6 +102,28 @@ Change the default model for future sessions:
 ```sh
 ccbunshin model provider1 claude-sonnet-4-5
 ```
+
+## Project-aware claude
+
+Add a wrapper to your shell that routes `claude` through the nearest ccbunshin project automatically:
+
+```sh
+eval "$(ccbunshin init bash)"   # Bash
+eval "$(ccbunshin init zsh)"    # Zsh
+eval `ccbunshin init tcsh`      # tcsh
+```
+
+A project is any directory (or ancestor of the current directory) that contains a `.ccbunshin-profile` marker. Inside one, `claude` behaves as `ccbunshin launch <provider>` and forwards every argument unchanged:
+
+```sh
+cd ~/projects/my-app            # .ccbunshin-profile says provider1
+claude -p "hello world"          # ccbunshin launch provider1 -p "hello world"
+claude --model sonnet --resume abc   # all arguments reach Claude unchanged
+```
+
+Outside a project, `claude` runs the original Claude Code command with the original arguments. The nearest marker wins, so nested projects work, and the exit status of Claude is returned.
+
+The wrapper reuses the existing `.ccbunshin-profile` marker created by `ccbunshin local <name>`; it introduces no new project marker. Bash and zsh define a `claude` shell function, tcsh an alias, so re-running eval is safe but replaces any `claude` function or alias you defined yourself. The original Claude Code binary remains callable and is what runs outside projects.
 
 ## Model routing
 
@@ -192,12 +214,13 @@ x86_64  -> amd64
 aarch64 -> arm64
 ```
 
-Run the Go checks:
+Run the Go checks and the shell integration tests:
 
 ```sh
 gofmt -w cmd/ccbunshin/*.go
 go -C cmd/ccbunshin vet ./...
 go -C cmd/ccbunshin test ./...
+sh tests/shell-integration.sh
 ```
 
 On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at boot with automatic restarts. For a user-local process, use `ccbunshin proxy start`, `status`, and `stop`.

@@ -353,6 +353,27 @@ func resolveLaunch(args []string) (string, []string, error) {
 	return name, args, nil
 }
 
+// resolveProvider returns the nearest .ccbunshin-profile provider for dir, or
+// "" when dir is not inside a ccbunshin project (no marker, or a malformed one).
+func resolveProvider(dir string) string {
+	name, _, err := findLocalProfile(dir)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+func resolveProviderCLI() error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if name := resolveProvider(dir); name != "" {
+		fmt.Println(name)
+	}
+	return nil
+}
+
 func proxyStateDir() string { return path.Join(home(), ".cache", "ccbunshin") }
 func proxyConfigPath() string {
 	if value := os.Getenv("CCBUNSHIN_PROXY_CONFIG"); value != "" {
@@ -421,6 +442,42 @@ func listProfiles() error {
 		fmt.Printf("%s\tmodel=%s\n", name, profileModel(path.Join(profilesDir(), entry.Name())))
 	}
 	return nil
+}
+
+// claudeInit is the claude wrapper shared by bash and zsh. It resolves the
+// nearest project provider lazily at call time, so cd/pushd/popd work without
+// any directory-change hooks. Redefining the function makes re-eval idempotent.
+const claudeInit = `# ccbunshin: route claude through the nearest .ccbunshin-profile project
+claude() {
+    local provider
+    provider="$(ccbunshin resolve-provider 2>/dev/null)"
+    if [ -n "$provider" ]; then
+        ccbunshin launch "$provider" "$@"
+    else
+        command claude "$@"
+    fi
+}
+`
+
+// tcshInit wraps claude in an alias. tcsh cannot express a conditional alias
+// (no functions, single-line if/then/else/endif rejected), so the alias simply
+// delegates to `ccbunshin run`, which resolves the nearest project provider and
+// falls back to the original claude binary outside projects. The guard makes
+// repeated eval a no-op.
+const tcshInit = "# ccbunshin: route claude through the nearest .ccbunshin-profile project\n" +
+	"if ( ! $?ccbunshin_loaded ) then\n" +
+	"    set ccbunshin_loaded\n" +
+	"    alias claude 'ccbunshin run \\!*'\n" +
+	"endif\n"
+
+func shellInit(shell string) (string, error) {
+	switch shell {
+	case "bash", "zsh":
+		return claudeInit, nil
+	case "tcsh":
+		return tcshInit, nil
+	}
+	return "", fmt.Errorf("unsupported shell %q (use bash, zsh, or tcsh)", shell)
 }
 
 func initCLI() error {
@@ -499,17 +556,52 @@ func profileCreate(name, source string, force bool) error {
 	}
 	return os.WriteFile(file, data, 0600)
 }
-func launchProfile(name string, args []string) error {
+func buildClaudeCommand(name string, args []string) (*exec.Cmd, error) {
 	file, err := profilePath(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := os.Stat(file); err != nil {
-		return err
+		return nil, err
 	}
 	command := exec.Command("claude", append([]string{"--settings", file}, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return command.Run()
+	return command, nil
+}
+
+func runExec(command *exec.Cmd) error {
+	if err := command.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.ExitCode())
+		}
+		return err
+	}
+	return nil
+}
+
+func runClaude(name string, args []string) error {
+	command, err := buildClaudeCommand(name, args)
+	if err != nil {
+		return err
+	}
+	return runExec(command)
+}
+
+// runProjectClaude launches claude with the nearest project provider, or the
+// plain claude binary when the directory is not inside a project. tcsh cannot
+// express a conditional alias, so its wrapper delegates to this command.
+func runProjectClaude(args []string) error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if name := resolveProvider(dir); name != "" {
+		return runClaude(name, args)
+	}
+	command := exec.Command("claude", args...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return runExec(command)
 }
 
 func proxyStart() error {
@@ -596,7 +688,7 @@ func main() {
 	}
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Println("usage: ccbunshin <init|create|launch|local|model|list|status|doctor|delete|uninstall|proxy>")
+		fmt.Println("usage: ccbunshin <init [bash|zsh|tcsh]|create|launch|local|model|list|status|doctor|delete|resolve-provider|proxy>")
 		return
 	}
 	var err error
@@ -606,12 +698,22 @@ func main() {
 		if resolveErr != nil {
 			err = resolveErr
 		} else {
-			err = launchProfile(name, claudeArgs)
+			err = runClaude(name, claudeArgs)
 		}
 	case "local":
 		err = localCLI(args[1:])
 	case "init":
-		err = initCLI()
+		if len(args) == 1 {
+			err = initCLI()
+		} else if len(args) == 2 {
+			var script string
+			script, err = shellInit(args[1])
+			if err == nil {
+				fmt.Print(script)
+			}
+		} else {
+			err = fmt.Errorf("init takes no argument or a shell: bash, zsh, or tcsh")
+		}
 	case "create":
 		if len(args) < 2 {
 			err = fmt.Errorf("create requires a profile")
@@ -668,6 +770,14 @@ func main() {
 		} else {
 			err = fmt.Errorf("unknown proxy command")
 		}
+	case "resolve-provider":
+		if len(args) != 1 {
+			err = fmt.Errorf("resolve-provider takes no arguments")
+		} else {
+			err = resolveProviderCLI()
+		}
+	case "run":
+		err = runProjectClaude(args[1:])
 	default:
 		err = fmt.Errorf("command %q is not implemented in unified Go CLI yet", args[0])
 	}
