@@ -1,7 +1,7 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3457"
+    "ANTHROPIC_BASE_URL": "http://localhost:3456"
   },
   "hooks": {},
-  "model": "provider2-model"
+  "model": "qwen-3.8-27b"
 }

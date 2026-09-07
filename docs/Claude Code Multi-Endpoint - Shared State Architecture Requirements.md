@@ -395,44 +395,29 @@ Claude Code
 
 ---
 
-# 11. Proxy Isolation
+# 11. Proxy Routing and Isolation
 
-The proxy may use separate instances or separate listeners for FREE and PAID.
+The deployment has one LeanCTX proxy instance, so ccbunshin exposes one configurable port. LeanCTX forwards Anthropic requests to that endpoint. ccbunshin inspects each request's `model` field and applies the ordered route rules from its JSON config.
 
-A simple and explicit design is:
-
-```text
-127.0.0.1:3456 → FREE
-127.0.0.1:3457 → PAID
-```
-
-For example:
+Route patterns use simple Go glob syntax: a pattern without `*` is an exact model match, while `claude-*` matches every model with that prefix. The default example routes `claude-*` to the SDC/paid gateway and `deepseek-v4-flash`, `qwen-3.8-27b`, and `gpt-oss-120b` to the free gateway. Users can edit providers, upstream URLs, route patterns, and model rewrites in the config file.
 
 ```text
-claude-free
+Claude Code
     │
     ▼
-127.0.0.1:3456
+LeanCTX :5000 or :4444
     │
     ▼
-FREE Gateway
+ccbunshin proxy :3456
+    ├── claude-*       → SDC/paid gateway
+    ├── qwen-3.8-27b   → free gateway
+    ├── deepseek-*     → free gateway
+    └── gpt-oss-120b   → free gateway
 ```
 
-```text
-claude-paid
-    │
-    ▼
-127.0.0.1:3457
-    │
-    ▼
-PAID Gateway
-```
+Authentication is not part of the proxy config. Claude Code's native auth settings and environment provide credentials; ccbunshin forwards the resulting authentication headers and never stores credentials.
 
-This makes the routing decision explicit and avoids the proxy having to guess whether a request belongs to FREE or PAID.
-
-A single proxy process with explicit per-request profile routing is also acceptable if it provides equivalent isolation.
-
-Do not introduce complexity solely for multi-instance support unless necessary.
+Unknown or missing models must be rejected rather than routed by guesswork. A separate-listener deployment remains possible but is not the default architecture.
 
 ---
 

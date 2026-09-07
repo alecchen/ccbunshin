@@ -182,27 +182,15 @@ residue in global settings.
 - Regression: add a hook to `~/.claude/settings.json`; `doctor` flags profiles that do not
   define `hooks`; launch still isolates for profiles that do.
 
-## 10. Phase 2 - multi-endpoint proxy (implemented)
+## 10. Phase 2 - model-routed proxy (implemented)
 
-The `proxy/` Go service owns provider routing independently from LeanCTX. It starts two explicit loopback listeners in one process:
+The `proxy/` Go service owns provider routing independently from LeanCTX. It starts one listener on the numeric `port` in a user-editable JSON config file, typically behind the single LeanCTX proxy listener on port 5000 or 4444.
 
-- `127.0.0.1:3456` for provider1
-- `127.0.0.1:3457` for provider2
+Each Anthropic request must contain a model. Ordered glob routes select the provider: patterns without `*` are exact matches, while patterns such as `claude-*` match prefixes. Provider definitions contain upstream URLs, timeouts, and optional model rewrites. Authentication remains in Claude Code settings and environment through native mechanisms such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper`; the proxy config contains no credentials.
 
-Each listener has its own upstream URL, API key, timeout, and exact model mapping configuration. Upstream URLs are required at startup through `CCBUNSHIN_PROVIDER1_UPSTREAM` and `CCBUNSHIN_PROVIDER2_UPSTREAM`; no credentials are committed. Requests and streaming responses use the Anthropic-compatible HTTP contract. Systemd unit examples are in `docs/systemd/`.
+See `examples/proxy.json` and `proxy/README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
 
-
-The requirements doc (sections 10-12) describes a custom proxy that maps Claude Code requests
-to the FREE (Qwen/DeepSeek) and PAID (Vertex Claude) gateways, including model-ID mapping
-(opus -> DeepSeek V4 Flash, sonnet/haiku -> Qwen). Profile `env` blocks point
-`ANTHROPIC_BASE_URL` at the proxy (or directly at a gateway). Open questions before
-implementation:
-
-- Language/runtime (Go single binary vs Node/bun, per CCPG precedent).
-- One proxy with per-request routing vs two explicit listeners (`127.0.0.1:3456` / `:3457`).
-- Whether model mapping is needed at all, or the gateways accept Claude Code's model IDs
-  directly (both assumed Anthropic-compatible).
-- systemd units for the Linux VM.
+The requirements doc describes the custom proxy that maps Claude Code requests to the FREE and PAID gateways while keeping LeanCTX responsible only for context optimization.
 
 ## 11. Non-goals
 

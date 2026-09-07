@@ -1,10 +1,10 @@
 [Unit]
-Description=ccbunshin provider2 proxy
+Description=ccbunshin model-routed proxy
 After=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/ccbunshin-proxy
-EnvironmentFile=/etc/ccbunshin/provider2.env
+EnvironmentFile=/etc/ccbunshin/proxy.env
 Restart=on-failure
 
 [Install]

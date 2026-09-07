@@ -1,0 +1,32 @@
+{
+  "port": 3456,
+  "providers": {
+    "provider1": {
+      "upstream": "https://sdc-gateway.example.invalid",
+      "models": {
+        "claude-opus-4-1": "claude-opus-4-1"
+      }
+    },
+    "provider2": {
+      "upstream": "https://free-gateway.example.invalid"
+    }
+  },
+  "routes": [
+    {
+      "pattern": "claude-*",
+      "provider": "provider1"
+    },
+    {
+      "pattern": "deepseek-v4-flash",
+      "provider": "provider2"
+    },
+    {
+      "pattern": "qwen-3.8-27b",
+      "provider": "provider2"
+    },
+    {
+      "pattern": "gpt-oss-120b",
+      "provider": "provider2"
+    }
+  ]
+}
