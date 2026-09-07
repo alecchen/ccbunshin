@@ -4,22 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-ccbunshin (影分身, "shadow clone"): a dependency-free tool to run multiple Claude Code
-configurations side by side - isolated configuration (endpoint, model, hooks, OTEL) with
-shared state (projects, history, todos, skills). Built for a company with two LLM gateways
-(FREE: Qwen/DeepSeek, PAID: Vertex Claude). Currently spec-only; no code yet.
+ccbunshin (影分身, "shadow clone"): a dependency-free Go tool that runs several Claude Code
+configurations side by side - isolated configuration (endpoint, model, hooks) with shared
+state (projects, history, todos, skills). It is built around two LLM gateway profiles (the
+generic `free`/`paid` examples) and an optional model-routed proxy between them. It is
+implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0.0.x`.
 
 ## Repo docs (read the relevant one before editing)
 
-- `Claude Code Multi-Endpoint - Shared State Architecture Requirements.md` - the problem
-  statement and hard requirements. Source of truth for WHAT must be solved.
-- `INVESTIGATION_FREE_PAID.md` - research: CCPG evaluation, GitHub alternatives, claude-rig
-  deep-dive. Historical context; its verdicts are superseded by the implementation spec.
-- `CCPROF_IMPLEMENTATION.md` - the design (filename kept from the working title). v2 chose
-  per-profile `--settings` files over the earlier `CLAUDE_CONFIG_DIR` + symlinks design; v3
-  adds the design-review decisions.
-- `CC_SWITCH_BASE_URL_PIN.md` - tangential note on pinning `ANTHROPIC_BASE_URL` against
+- `docs/CCBUNSHIN_IMPLEMENTATION.md` - the design and implementation notes (filename kept
+  from an earlier working title). v2 chose per-profile `--settings` files over the earlier
+  `CLAUDE_CONFIG_DIR` + symlinks design; later sections cover the project-aware `claude`
+  wrapper and the implemented model-routed proxy. Read before changing CLI behavior.
+- `docs/Claude Code Multi-Endpoint - Shared State Architecture Requirements.md` - the
+  problem statement and hard requirements. Source of truth for WHAT must be solved.
+- `docs/INVESTIGATION_FREE_PAID.md` - research: CCPG evaluation, GitHub alternatives,
+  claude-rig deep-dive. Historical context; its verdicts are superseded by the
+  implementation spec and the code.
+- `docs/CC_SWITCH_BASE_URL_PIN.md` - tangential note on pinning `ANTHROPIC_BASE_URL` against
   cc-switch rewrites via `--settings`.
+- `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
+  documentation.
 
 ## Key decisions (do not silently reverse)
 
@@ -40,20 +45,36 @@ shared state (projects, history, todos, skills). Built for a company with two LL
 4. **Auth is out of scope**: Claude Code's native mechanisms handle it
    (`ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper`). ccbunshin never reads or
    writes credentials.
-5. **Scope**: phase 1 = config isolation (bash tool). Phase 2 = multi-endpoint proxy
-   (deferred; open questions in spec section 10). No LeanCTX integration, no GUI, no binary
-   version management.
+5. **Scope**: config isolation, directory-local (`local`) profiles, and project-aware
+   `claude` shell wrappers are implemented, as is the model-routed proxy. Still out of
+   scope: LeanCTX integration, GUI, binary version management.
 6. **The internal switcher** (company tool) writes global `~/.claude/settings.json` and stays
    untouched; profile launches override it via `--settings`.
+7. **The project-aware wrapper is a thin router**: a `.ccbunshin-profile` marker (the same
+   file `ccbunshin local` writes) selects a project. Bash and zsh wrappers call
+   `ccbunshin resolve-provider` and route to `ccbunshin launch <provider>`. tcsh cannot
+   express a conditional alias, so its wrapper delegates to the internal `ccbunshin run`,
+   which resolves the provider or falls back to the original `claude` binary. Shell code
+   never parses profile files and never maintains a Claude option list: `launch` forwards
+   arguments unchanged and returns Claude's exit status.
 
 ## Status
 
-Draft spec, no implementation. Phase-1 tool (CLI: `init`/`create`/`launch`/`model`/`list`/
-`status`/`doctor`/`delete`) is the next deliverable. No build/test commands exist yet.
+Implemented as a Go CLI in `cmd/ccbunshin` (no longer spec-only). The model-routed proxy
+and the project-aware `claude` shell integration (bash/zsh/tcsh) are included. Releases are
+tagged `v0.0.x`; pushing a `v*` tag triggers the GitHub Actions build-and-release workflow.
 
 ## Verification requirement
 
-Every implementation change must include a way to verify the behavior. Add or update automated tests where practical, and document the verification command in the relevant README or implementation document. At minimum, run syntax, lint, build, or test validation appropriate to the changed code before declaring the work complete.
+Every implementation change must include a way to verify the behavior. Add or update automated tests where practical, and document the verification command in the relevant README or implementation document. At minimum, run the validation appropriate to the changed code before declaring the work complete.
+
+Verification commands for this repo:
+
+```sh
+go -C cmd/ccbunshin vet ./...
+go -C cmd/ccbunshin test ./...
+sh tests/shell-integration.sh   # project-aware claude wrapper across bash, zsh, tcsh
+```
 
 
 This repo is intended for public release; committed docs must contain no company-specific

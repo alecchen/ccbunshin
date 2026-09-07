@@ -341,4 +341,4 @@ must be explicitly shared with `claude-rig share <rig> <items>`. Launch sets
 claude-rig is still the best design (per-rig `settings.json`/hooks + explicit state sharing is
 exactly the target architecture), but its default-isolated state, bundled-plugin injection,
 and 3-month dormancy make adoption risky. For a company, the strongest path is a small
-in-house wrapper modeled on claude-rig's isolation map - see `CCPROF_IMPLEMENTATION.md`.
+in-house wrapper modeled on claude-rig's isolation map - see `CCBUNSHIN_IMPLEMENTATION.md`.
