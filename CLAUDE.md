@@ -45,9 +45,9 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
 4. **Auth is out of scope**: Claude Code's native mechanisms handle it
    (`ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper`). ccbunshin never reads or
    writes credentials.
-5. **Scope**: config isolation, directory-local (`local`) profiles, and project-aware
-   `claude` shell wrappers are implemented, as is the model-routed proxy. Still out of
-   scope: LeanCTX integration, GUI, binary version management.
+5. **Scope**: config isolation, directory-local (`local`) profiles, project-aware
+   `claude` shell wrappers, the model-routed proxy, and self-update (`ccbunshin update`)
+   are implemented. Still out of scope: LeanCTX integration, GUI.
 6. **The internal switcher** (company tool) writes global `~/.claude/settings.json` and stays
    untouched; profile launches override it via `--settings`.
 7. **The project-aware wrapper is a thin router**: a `.ccbunshin-profile` marker (the same
@@ -64,7 +64,10 @@ Implemented as a Go CLI in `cmd/ccbunshin` (no longer spec-only). The model-rout
 and the project-aware `claude` shell integration (bash/zsh/tcsh) are included. Releases are
 tagged `v0.0.x`; pushing a `v*` tag triggers the GitHub Actions build-and-release workflow.
 `install.sh` installs the latest GitHub release by default (`CCBUNSHIN_VERSION` pins a
-specific version), so publishing a new tag requires no `install.sh` change.
+specific version), so publishing a new tag requires no `install.sh` change. `ccbunshin
+update` checks the latest release and, when a newer version exists, prints the current and
+latest versions and replaces the binary in place; release binaries carry their version via
+`-ldflags -X main.version`.
 
 ## Verification requirement
 

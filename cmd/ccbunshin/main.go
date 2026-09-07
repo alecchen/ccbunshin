@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -673,6 +675,157 @@ func proxyStop() error {
 	return nil
 }
 
+// version is stamped at build time via -ldflags "-X main.version=<tag>".
+// Release binaries carry their release tag; locally built binaries are empty.
+var version = ""
+
+func updateRepo() string {
+	if value := os.Getenv("CCBUNSHIN_REPO"); value != "" {
+		return value
+	}
+	return "alecchen/ccbunshin"
+}
+
+func assetName(goos, goarch string) (string, bool) {
+	switch goos + "/" + goarch {
+	case "linux/amd64":
+		return "ccbunshin-linux-amd64", true
+	case "linux/arm64":
+		return "ccbunshin-linux-arm64", true
+	case "darwin/amd64":
+		return "ccbunshin-darwin-amd64", true
+	case "darwin/arm64":
+		return "ccbunshin-darwin-arm64", true
+	}
+	return "", false
+}
+
+func versionParts(tag string) []int {
+	tag = strings.TrimPrefix(strings.TrimSpace(tag), "v")
+	parts := []int{}
+	for _, field := range strings.Split(tag, ".") {
+		number, err := strconv.Atoi(field)
+		if err != nil {
+			return parts
+		}
+		parts = append(parts, number)
+	}
+	return parts
+}
+
+// compareVersions orders dotted numeric tags; it returns -1, 0, or 1.
+func compareVersions(a, b string) int {
+	left, right := versionParts(a), versionParts(b)
+	for i := 0; i < len(left) || i < len(right); i++ {
+		la, rb := 0, 0
+		if i < len(left) {
+			la = left[i]
+		}
+		if i < len(right) {
+			rb = right[i]
+		}
+		if la < rb {
+			return -1
+		}
+		if la > rb {
+			return 1
+		}
+	}
+	return 0
+}
+
+func latestReleaseTag(repo string) (string, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	response, err := client.Get("https://api.github.com/repos/" + repo + "/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetching latest release: status %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.TagName == "" {
+		return "", fmt.Errorf("latest release has no tag")
+	}
+	return payload.TagName, nil
+}
+
+func downloadRelease(repo, tag, file string) error {
+	asset, ok := assetName(runtime.GOOS, runtime.GOARCH)
+	if !ok {
+		return fmt.Errorf("no release binary for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	url := "https://github.com/" + repo + "/releases/download/" + tag + "/" + asset
+	client := &http.Client{Timeout: 60 * time.Second}
+	response, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("downloading %s: status %d", url, response.StatusCode)
+	}
+	output, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, response.Body)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func updateCLI() error {
+	repo := updateRepo()
+	current := strings.TrimSpace(version)
+	latest, err := latestReleaseTag(repo)
+	if err != nil {
+		return err
+	}
+	if current == "" {
+		fmt.Printf("installed version is unknown (not a release build); latest is %s - reinstall with install.sh\n", latest)
+		return nil
+	}
+	if compareVersions(current, latest) >= 0 {
+		fmt.Printf("already up to date (current %s)\n", current)
+		return nil
+	}
+	fmt.Printf("current is %s, latest is %s, updating to %s\n", current, latest, latest)
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(executable), ".ccbunshin-update-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	if err := downloadRelease(repo, latest, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, executable); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	fmt.Printf("updated to %s\n", latest)
+	return nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--proxy-server" {
 		cfg, err := loadConfig(proxyConfigPath())
@@ -688,7 +841,7 @@ func main() {
 	}
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Println("usage: ccbunshin <init [bash|zsh|tcsh]|create|launch|local|model|list|status|doctor|delete|resolve-provider|proxy>")
+		fmt.Println("usage: ccbunshin <init [bash|zsh|tcsh]|create|launch|local|model|list|status|doctor|delete|resolve-provider|run|update|proxy>")
 		return
 	}
 	var err error
@@ -778,6 +931,8 @@ func main() {
 		}
 	case "run":
 		err = runProjectClaude(args[1:])
+	case "update":
+		err = updateCLI()
 	default:
 		err = fmt.Errorf("command %q is not implemented in unified Go CLI yet", args[0])
 	}

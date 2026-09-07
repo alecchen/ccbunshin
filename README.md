@@ -14,6 +14,8 @@ curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh 
 
 The installer downloads the newest GitHub release for Linux or macOS on amd64 or arm64, so publishing a release needs no installer change. Set `CCBUNSHIN_VERSION` to pin a specific release (for example `CCBUNSHIN_VERSION=v0.0.3 sh install.sh`), or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
 
+Update an installed binary later with `ccbunshin update`, which checks the latest release, prints the current and latest versions when an update is available, and replaces the binary in place.
+
 Initialize the profile directory. This creates `~/.claude-profiles/` if needed and prints the directory path:
 
 ```sh

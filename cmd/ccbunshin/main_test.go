@@ -279,3 +279,43 @@ func TestResolveProvider(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"v0.0.4", "v0.0.3", 1},
+		{"v0.0.3", "v0.0.4", -1},
+		{"v0.0.3", "v0.0.3", 0},
+		{"v0.10.0", "v0.9.9", 1},
+		{"v0.0.3", "v0.0.3.1", -1},
+	}
+	for _, tc := range cases {
+		if got := compareVersions(tc.a, tc.b); got != tc.want {
+			t.Errorf("compareVersions(%s, %s) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestAssetName(t *testing.T) {
+	cases := []struct {
+		goos, goarch, want string
+	}{
+		{"linux", "amd64", "ccbunshin-linux-amd64"},
+		{"linux", "arm64", "ccbunshin-linux-arm64"},
+		{"darwin", "amd64", "ccbunshin-darwin-amd64"},
+		{"darwin", "arm64", "ccbunshin-darwin-arm64"},
+		{"windows", "amd64", ""},
+		{"darwin", "386", ""},
+	}
+	for _, tc := range cases {
+		got, ok := assetName(tc.goos, tc.goarch)
+		if got != tc.want {
+			t.Errorf("assetName(%s/%s) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		}
+		if (tc.want != "") != ok {
+			t.Errorf("assetName(%s/%s) ok = %v", tc.goos, tc.goarch, ok)
+		}
+	}
+}
