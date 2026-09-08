@@ -489,6 +489,27 @@ func TestInitIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestTcshInitIsBackquoteSafe(t *testing.T) {
+	script, err := shellInit("tcsh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// `eval `+"`ccbunshin init tcsh`"+` flattens newlines: the output must be a
+	// single alias line, or tcsh fails with "Badly placed ()'s".
+	lines := strings.Split(strings.TrimSpace(script), "\n")
+	if len(lines) != 1 {
+		t.Errorf("tcsh init must be one line, got %d:\n%s", len(lines), script)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(script), "alias claude") {
+		t.Errorf("tcsh init must define the claude alias, got:\n%s", script)
+	}
+	for _, bad := range []string{"if (", "endif", "#"} {
+		if strings.Contains(script, bad) {
+			t.Errorf("tcsh init contains %q, which breaks backquote eval:\n%s", bad, script)
+		}
+	}
+}
+
 func TestProxyInitWritesTemplate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

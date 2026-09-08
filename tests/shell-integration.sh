@@ -97,7 +97,14 @@ run_shell() {
   expected_file
   : > "$LOG"
   # The second eval of the same init must be a no-op (no nesting, no re-alias).
-  code=$(printf '%s\n%s\n%s\n%s\n' "$init" "$SCEN" "$init" "$tail")
+  # tcsh goes through backquote eval like a real .tcshrc hook; backquotes
+  # flatten newlines, so this also guards against multi-line tcsh output
+  # ("Badly placed ()'s").
+  if [ "$shell" = tcsh ]; then
+    code=$(printf 'eval `ccbunshin init tcsh`\n%s\neval `ccbunshin init tcsh`\n%s\n' "$SCEN" "$tail")
+  else
+    code=$(printf '%s\n%s\n%s\n%s\n' "$init" "$SCEN" "$init" "$tail")
+  fi
   "$shell" $flags "$code" || { echo "FAILED: $shell scenario exited $?"; return 1; }
   if ! diff -u "$WORK/expected" "$LOG"; then
     echo "FAILED: $shell argv mismatch"

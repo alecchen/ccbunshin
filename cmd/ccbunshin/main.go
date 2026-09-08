@@ -521,13 +521,12 @@ claude() {
 // tcshInit wraps claude in an alias. tcsh cannot express a conditional alias
 // (no functions, single-line if/then/else/endif rejected), so the alias simply
 // delegates to `ccbunshin run`, which resolves the nearest project provider and
-// falls back to the original claude binary outside projects. The guard makes
-// repeated eval a no-op.
-const tcshInit = "# ccbunshin: route claude through the nearest .ccbunshin-profile project\n" +
-	"if ( ! $?ccbunshin_loaded ) then\n" +
-	"    set ccbunshin_loaded\n" +
-	"    alias claude 'ccbunshin run \\!*'\n" +
-	"endif\n"
+// falls back to the original claude binary outside projects. The output must
+// stay a single alias line with no leading comment: backquote substitution in
+// `eval `+"`ccbunshin init tcsh`"+` flattens newlines, which breaks multi-line
+// if/then/endif ("Badly placed ()'s") and lets a # comment swallow the alias.
+// Re-running eval just redefines the alias, so it is idempotent.
+const tcshInit = "alias claude 'ccbunshin run \\!*'\n"
 
 func shellInit(shell string) (string, error) {
 	switch shell {
