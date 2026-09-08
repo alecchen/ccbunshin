@@ -319,3 +319,101 @@ func TestAssetName(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandHelpCoversUsageCommands(t *testing.T) {
+	for _, name := range []string{"init", "create", "launch", "local", "model", "list", "status", "doctor", "delete", "proxy", "update", "help"} {
+		text, ok := commandHelp(name)
+		if !ok || !strings.Contains(text, "usage: ccbunshin "+name) {
+			t.Errorf("commandHelp(%q) missing usage", name)
+		}
+		if strings.Count(text, "\n") < 3 {
+			t.Errorf("commandHelp(%q) has no description body", name)
+		}
+	}
+	for _, name := range []string{"resolve-provider", "run"} {
+		if _, ok := commandHelp(name); !ok {
+			t.Errorf("commandHelp(%q) missing internal help", name)
+		}
+	}
+	if _, ok := commandHelp("bogus"); ok {
+		t.Error("commandHelp(bogus) accepted unknown command")
+	}
+}
+
+func TestRunCLIUsageErrors(t *testing.T) {
+	chdirT(t, t.TempDir())
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	cases := [][]string{
+		{"create"},
+		{"model"},
+		{"model", "only-one"},
+		{"status"},
+		{"doctor"},
+		{"delete"},
+		{"proxy"},
+		{"proxy", "bogus"},
+		{"resolve-provider", "extra"},
+		{"list", "extra"},
+		{"init", "a", "b"},
+		{"init", "fish"},
+		{"local", "a", "b"},
+		{"local"},
+		{"launch"},
+		{"bogus"},
+		{"help", "bogus"},
+	}
+	for _, args := range cases {
+		err := runCLI(args)
+		if err == nil {
+			t.Errorf("runCLI(%q) = nil, want usage error", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("runCLI(%q) = %q, want usage text", args, err)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestListEmptyModel(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := profileCreate("provider1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if err := runCLI([]string{"list"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "provider1\tmodel=(no model set)") {
+		t.Errorf("list output = %q, want (no model set) marker", output)
+	}
+	if err := setProfileModel("provider1", "sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	output = captureStdout(t, func() {
+		if err := runCLI([]string{"list"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "provider1\tmodel=sonnet") {
+		t.Errorf("list output = %q, want model=sonnet", output)
+	}
+}

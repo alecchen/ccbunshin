@@ -33,7 +33,12 @@ ccbunshin list
 ccbunshin status <name>
 ccbunshin doctor <name>
 ccbunshin delete <name>
+ccbunshin help [<command>]
 ```
+
+`ccbunshin --help` prints the command list; `ccbunshin help <command>` and
+`ccbunshin <command> --help` print details for one command. Missing or
+wrong arguments also print the relevant help.
 
 `ccbunshin launch provider1` runs:
 

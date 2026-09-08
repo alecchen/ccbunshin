@@ -69,7 +69,12 @@ ccbunshin delete <name>
 ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy stop
+ccbunshin update
 ```
+
+`ccbunshin --help` prints this list; `ccbunshin help <command>` and
+`ccbunshin <command> --help` print details for one command. Missing or
+wrong arguments also print the relevant help.
 
 Launch a profile explicitly:
 

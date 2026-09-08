@@ -326,7 +326,7 @@ func localCLI(args []string) error {
 		}
 		name, file, err := findLocalProfile(dir)
 		if err != nil {
-			return fmt.Errorf("no local profile found")
+			return usageError("local", "no local profile found")
 		}
 		fmt.Printf("profile: %s\nsource: %s\n", name, file)
 		return nil
@@ -335,7 +335,7 @@ func localCLI(args []string) error {
 		return unsetLocalProfile()
 	}
 	if len(args) != 1 {
-		return fmt.Errorf("local requires a profile or --unset")
+		return usageError("local", "local requires a profile or --unset")
 	}
 	return setLocalProfile(args[0])
 }
@@ -441,7 +441,11 @@ func listProfiles() error {
 			continue
 		}
 		name := strings.TrimSuffix(entry.Name(), ".json")
-		fmt.Printf("%s\tmodel=%s\n", name, profileModel(path.Join(profilesDir(), entry.Name())))
+		model := profileModel(path.Join(profilesDir(), entry.Name()))
+		if model == "" {
+			model = "(no model set)"
+		}
+		fmt.Printf("%s\tmodel=%s\n", name, model)
 	}
 	return nil
 }
@@ -826,6 +830,252 @@ func updateCLI() error {
 	return nil
 }
 
+const usageText = `usage: ccbunshin <command> [args]
+
+Commands:
+  init [bash|zsh|tcsh]             create the profile directory, or print a shell wrapper
+  create <name> [--from <file>] [--force]
+                                   create a profile
+  launch [<name>] [claude args...] run Claude Code with a profile
+  local [<name>|--unset]           show, set, or clear the directory-local profile
+  model <name> <model>             set the default model for a profile
+  list                             list profiles
+  status <name>                    show a profile path and model
+  doctor <name>                    check a profile for missing keys
+  delete <name>                    delete a profile
+  proxy <start|stop|status>        manage the model-routed proxy
+  update                           update to the latest release
+  help [<command>]                 show help, or help for one command
+
+Run "ccbunshin <command> --help" for details.
+`
+
+func commandHelp(name string) (string, bool) {
+	switch name {
+	case "init":
+		return `usage: ccbunshin init [bash|zsh|tcsh]
+
+With no argument, create ~/.claude-profiles (mode 700) and print its path.
+With a shell name, print a wrapper that routes "claude" through the nearest
+.ccbunshin-profile project; eval it from your shell rc:
+
+  eval "$(ccbunshin init bash)"
+  eval "$(ccbunshin init zsh)"
+` + "  eval `ccbunshin init tcsh`\n", true
+	case "create":
+		return `usage: ccbunshin create <name> [--from <file>] [--force]
+
+Create ~/.claude-profiles/<name>.json (mode 600). --from copies an existing
+JSON file (for example examples/provider2.json); without it a blank template
+is used. --force overwrites an existing profile.
+`, true
+	case "launch":
+		return `usage: ccbunshin launch [<name>] [claude args...]
+
+Run "claude --settings ~/.claude-profiles/<name>.json". Extra arguments are
+forwarded to Claude unchanged and its exit status is returned. With no name,
+use the nearest .ccbunshin-profile marker in this directory or a parent; an
+explicit name takes precedence.
+`, true
+	case "local":
+		return `usage: ccbunshin local [<name>|--unset]
+
+With no argument, print the nearest .ccbunshin-profile marker (searching this
+directory upward) and its profile. With a name, write .ccbunshin-profile in
+the current directory. --unset removes it.
+`, true
+	case "model":
+		return `usage: ccbunshin model <name> <model>
+
+Set the "model" key in the profile for future sessions:
+
+  ccbunshin model provider1 claude-sonnet-4-5
+`, true
+	case "list":
+		return `usage: ccbunshin list
+
+List profiles as "<name>\tmodel=<model>" ("(no model set)" when unset).
+`, true
+	case "status":
+		return `usage: ccbunshin status <name>
+
+Print the profile file path and its model.
+`, true
+	case "doctor":
+		return `usage: ccbunshin doctor <name>
+
+Warn about missing "env", "hooks", or "model" keys in the profile.
+`, true
+	case "delete":
+		return `usage: ccbunshin delete <name>
+
+Remove ~/.claude-profiles/<name>.json.
+`, true
+	case "proxy":
+		return `usage: ccbunshin proxy <start|stop|status>
+
+Manage the model-routed proxy in the background. The config comes from
+$CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json; PID and log
+are stored in ~/.cache/ccbunshin/.
+`, true
+	case "update":
+		return `usage: ccbunshin update
+
+Check the latest GitHub release (repo from $CCBUNSHIN_REPO, default
+alecchen/ccbunshin) and replace this binary in place when a newer tag exists.
+`, true
+	case "resolve-provider":
+		return `usage: ccbunshin resolve-provider
+
+Print the nearest .ccbunshin-profile provider for the current directory, or
+nothing outside a project. Used by the bash/zsh wrapper.
+`, true
+	case "run":
+		return `usage: ccbunshin run [claude args...]
+
+Run Claude Code with the nearest project provider, or plain "claude" outside
+a project. Used by the tcsh wrapper.
+`, true
+	case "help":
+		return `usage: ccbunshin help [<command>]
+
+Show the command list, or detailed help for one command.
+`, true
+	}
+	return "", false
+}
+
+// usageError pairs a bad-invocation message with the command help, so
+// argument errors print usage instead of a bare one-liner.
+func usageError(command, message string) error {
+	if text, ok := commandHelp(command); ok {
+		return fmt.Errorf("%s\n\n%s", message, text)
+	}
+	return errors.New(message)
+}
+
+func runCLI(args []string) error {
+	if len(args) == 0 {
+		fmt.Print(usageText)
+		return nil
+	}
+	if args[0] == "--help" || args[0] == "-h" {
+		fmt.Print(usageText)
+		return nil
+	}
+	if args[0] == "help" {
+		if len(args) == 1 {
+			fmt.Print(usageText)
+			return nil
+		}
+		if args[1] == "--help" || args[1] == "-h" {
+			args[1] = "help"
+		}
+		if text, ok := commandHelp(args[1]); ok {
+			fmt.Print(text)
+			return nil
+		}
+		return fmt.Errorf("unknown command %q\n\n%s", args[1], usageText)
+	}
+	// "<cmd> --help" prints command help, except for run: the tcsh wrapper
+	// routes "claude --help" through run, so its flags must reach Claude.
+	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") && args[0] != "run" {
+		if text, ok := commandHelp(args[0]); ok {
+			fmt.Print(text)
+			return nil
+		}
+	}
+	switch args[0] {
+	case "launch":
+		name, claudeArgs, resolveErr := resolveLaunch(args[1:])
+		if resolveErr != nil {
+			return usageError("launch", resolveErr.Error())
+		}
+		return runClaude(name, claudeArgs)
+	case "local":
+		return localCLI(args[1:])
+	case "init":
+		if len(args) == 1 {
+			return initCLI()
+		}
+		if len(args) == 2 {
+			script, err := shellInit(args[1])
+			if err != nil {
+				return usageError("init", err.Error())
+			}
+			fmt.Print(script)
+			return nil
+		}
+		return usageError("init", "init takes no argument or a shell: bash, zsh, or tcsh")
+	case "create":
+		if len(args) < 2 {
+			return usageError("create", "create requires a profile")
+		}
+		source := ""
+		force := false
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--force" {
+				force = true
+			} else if args[i] == "--from" && i+1 < len(args) {
+				i++
+				source = args[i]
+			}
+		}
+		return profileCreate(args[1], source, force)
+	case "model":
+		if len(args) != 3 {
+			return usageError("model", "model requires a profile and model")
+		}
+		return setProfileModel(args[1], args[2])
+	case "list":
+		if len(args) != 1 {
+			return usageError("list", "list takes no arguments")
+		}
+		return listProfiles()
+	case "status":
+		if len(args) != 2 {
+			return usageError("status", "status requires a profile")
+		}
+		return statusProfile(args[1])
+	case "doctor":
+		if len(args) != 2 {
+			return usageError("doctor", "doctor requires a profile")
+		}
+		return doctorProfile(args[1])
+	case "delete":
+		if len(args) != 2 {
+			return usageError("delete", "delete requires a profile")
+		}
+		return deleteProfile(args[1])
+	case "uninstall":
+		return uninstallCLI()
+	case "proxy":
+		if len(args) < 2 {
+			return usageError("proxy", "proxy requires start, stop, or status")
+		}
+		switch args[1] {
+		case "start":
+			return proxyStart()
+		case "stop":
+			return proxyStop()
+		case "status":
+			return proxyStatus()
+		}
+		return usageError("proxy", fmt.Sprintf("unknown proxy command %q", args[1]))
+	case "resolve-provider":
+		if len(args) != 1 {
+			return usageError("resolve-provider", "resolve-provider takes no arguments")
+		}
+		return resolveProviderCLI()
+	case "run":
+		return runProjectClaude(args[1:])
+	case "update":
+		return updateCLI()
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", args[0], usageText)
+	}
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--proxy-server" {
 		cfg, err := loadConfig(proxyConfigPath())
@@ -839,104 +1089,7 @@ func main() {
 		}
 		return
 	}
-	args := os.Args[1:]
-	if len(args) == 0 {
-		fmt.Println("usage: ccbunshin <init [bash|zsh|tcsh]|create|launch|local|model|list|status|doctor|delete|resolve-provider|run|update|proxy>")
-		return
-	}
-	var err error
-	switch args[0] {
-	case "launch":
-		name, claudeArgs, resolveErr := resolveLaunch(args[1:])
-		if resolveErr != nil {
-			err = resolveErr
-		} else {
-			err = runClaude(name, claudeArgs)
-		}
-	case "local":
-		err = localCLI(args[1:])
-	case "init":
-		if len(args) == 1 {
-			err = initCLI()
-		} else if len(args) == 2 {
-			var script string
-			script, err = shellInit(args[1])
-			if err == nil {
-				fmt.Print(script)
-			}
-		} else {
-			err = fmt.Errorf("init takes no argument or a shell: bash, zsh, or tcsh")
-		}
-	case "create":
-		if len(args) < 2 {
-			err = fmt.Errorf("create requires a profile")
-		} else {
-			source := ""
-			force := false
-			for i := 2; i < len(args); i++ {
-				if args[i] == "--force" {
-					force = true
-				} else if args[i] == "--from" && i+1 < len(args) {
-					i++
-					source = args[i]
-				}
-			}
-			err = profileCreate(args[1], source, force)
-		}
-	case "model":
-		if len(args) != 3 {
-			err = fmt.Errorf("model requires a profile and model")
-		} else {
-			err = setProfileModel(args[1], args[2])
-		}
-	case "list":
-		err = listProfiles()
-	case "status":
-		if len(args) != 2 {
-			err = fmt.Errorf("status requires a profile")
-		} else {
-			err = statusProfile(args[1])
-		}
-	case "doctor":
-		if len(args) != 2 {
-			err = fmt.Errorf("doctor requires a profile")
-		} else {
-			err = doctorProfile(args[1])
-		}
-	case "delete":
-		if len(args) != 2 {
-			err = fmt.Errorf("delete requires a profile")
-		} else {
-			err = deleteProfile(args[1])
-		}
-	case "uninstall":
-		err = uninstallCLI()
-	case "proxy":
-		if len(args) < 2 {
-			err = fmt.Errorf("proxy requires start, stop, or status")
-		} else if args[1] == "start" {
-			err = proxyStart()
-		} else if args[1] == "stop" {
-			err = proxyStop()
-		} else if args[1] == "status" {
-			err = proxyStatus()
-		} else {
-			err = fmt.Errorf("unknown proxy command")
-		}
-	case "resolve-provider":
-		if len(args) != 1 {
-			err = fmt.Errorf("resolve-provider takes no arguments")
-		} else {
-			err = resolveProviderCLI()
-		}
-	case "run":
-		err = runProjectClaude(args[1:])
-	case "update":
-		err = updateCLI()
-	default:
-		err = fmt.Errorf("command %q is not implemented in unified Go CLI yet", args[0])
-	}
-	if err != nil {
+	if err := runCLI(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
 }
