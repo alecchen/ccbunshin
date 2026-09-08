@@ -33,6 +33,7 @@ ccbunshin list
 ccbunshin status <name>
 ccbunshin doctor <name>
 ccbunshin delete <name>
+ccbunshin version
 ccbunshin help [<command>]
 ```
 

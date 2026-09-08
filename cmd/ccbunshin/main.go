@@ -774,6 +774,15 @@ func proxyStop() error {
 // Release binaries carry their release tag; locally built binaries are empty.
 var version = ""
 
+func printVersion() {
+	current := strings.TrimSpace(version)
+	if current == "" {
+		fmt.Println("unknown (not a release build)")
+		return
+	}
+	fmt.Println(current)
+}
+
 func updateRepo() string {
 	if value := os.Getenv("CCBUNSHIN_REPO"); value != "" {
 		return value
@@ -936,6 +945,7 @@ Commands:
   delete <name>                    delete a profile
   proxy <init|start|stop|status>   manage the model-routed proxy
   update                           update to the latest release
+  version                          print the binary version
   help [<command>]                 show help, or help for one command
 
 Run "ccbunshin <command> --help" for details.
@@ -1019,6 +1029,12 @@ are stored in ~/.cache/ccbunshin/. init writes a proxy.json template;
 Check the latest GitHub release (repo from $CCBUNSHIN_REPO, default
 alecchen/ccbunshin) and replace this binary in place when a newer tag exists.
 `, true
+	case "version":
+		return `usage: ccbunshin version
+
+Print the binary version (release tag stamped at build time, "unknown (not a
+release build)" for local builds; "ccbunshin --version" works too).
+`, true
 	case "resolve-provider":
 		return `usage: ccbunshin resolve-provider
 
@@ -1056,6 +1072,10 @@ func runCLI(args []string) error {
 	}
 	if args[0] == "--help" || args[0] == "-h" {
 		fmt.Print(usageText)
+		return nil
+	}
+	if args[0] == "--version" || args[0] == "-V" {
+		printVersion()
 		return nil
 	}
 	if args[0] == "help" {
@@ -1172,6 +1192,12 @@ func runCLI(args []string) error {
 		return runProjectClaude(args[1:])
 	case "update":
 		return updateCLI()
+	case "version":
+		if len(args) != 1 {
+			return usageError("version", "version takes no arguments")
+		}
+		printVersion()
+		return nil
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], usageText)
 	}

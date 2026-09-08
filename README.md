@@ -75,6 +75,7 @@ ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy stop
 ccbunshin update
+ccbunshin version
 ```
 
 `ccbunshin --help` prints this list; `ccbunshin help <command>` and

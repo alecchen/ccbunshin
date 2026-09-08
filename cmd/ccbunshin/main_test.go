@@ -321,7 +321,7 @@ func TestAssetName(t *testing.T) {
 }
 
 func TestCommandHelpCoversUsageCommands(t *testing.T) {
-	for _, name := range []string{"init", "create", "launch", "local", "model", "list", "status", "doctor", "delete", "proxy", "update", "help"} {
+	for _, name := range []string{"init", "create", "launch", "local", "model", "list", "status", "doctor", "delete", "proxy", "update", "version", "help"} {
 		text, ok := commandHelp(name)
 		if !ok || !strings.Contains(text, "usage: ccbunshin "+name) {
 			t.Errorf("commandHelp(%q) missing usage", name)
