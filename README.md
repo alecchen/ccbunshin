@@ -66,6 +66,7 @@ ccbunshin list
 ccbunshin status <name>
 ccbunshin doctor <name>
 ccbunshin delete <name>
+ccbunshin proxy init [--force]
 ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy stop
@@ -112,7 +113,12 @@ ccbunshin model provider1 claude-sonnet-4-5
 
 ## Project-aware claude
 
-Add a wrapper to your shell that routes `claude` through the nearest ccbunshin project automatically:
+`ccbunshin init` (no args) detects `~/.bashrc`, `~/.zshrc`, `~/.tcshrc`/`~/.cshrc`
+and appends the matching wrapper hook to each file that exists, printing
+per-file status (`installed:` / `ok: already hooks` / `skip: not found`) to
+stdout. It is idempotent: re-running never duplicates a hook.
+
+Alternatively, add a wrapper to one shell manually:
 
 ```sh
 eval "$(ccbunshin init bash)"   # Bash
@@ -142,14 +148,32 @@ ccbunshin :3456
 └── qwen/deepseek/gpt-oss -> provider2
 ```
 
-Start the proxy with:
+Generate a starting config with:
+
+```sh
+ccbunshin proxy init
+```
+
+This writes a template to `~/.config/ccbunshin/proxy.json` (mode `600`),
+or to `$CCBUNSHIN_PROXY_CONFIG` when set. Use `--force` to overwrite an
+existing file. Edit the upstreams and routes, then start the proxy with:
 
 ```sh
 export CCBUNSHIN_PROXY_CONFIG=/path/to/proxy.json
 ccbunshin proxy start
 ```
 
-A route without `*` matches one exact model. A route such as `claude-*` matches models with that prefix. Provider URLs and model rewrites belong in the JSON config. Authentication stays in Claude Code settings and environment variables, not in the proxy config.
+Routes select the provider; `models` rewrites the model ID after routing.
+
+A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` matches any run of characters (`"claude-*"` matches `claude-sonnet-4-5`). Routes are checked in order; the first match wins. Once routed, the provider's `models` map optionally replaces the request's model ID with the upstream's ID before forwarding. Provider URLs and model rewrites belong in the JSON config. Authentication stays in Claude Code settings and environment variables, not in the proxy config.
+
+`proxy.json` keys:
+
+- `port` (required, 1-65535): the port the proxy listens on.
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream.
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected.
+
+See `examples/proxy.json` for the full example the `init` template is based on.
 
 ### Different mappings per profile
 

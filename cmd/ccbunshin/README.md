@@ -57,7 +57,13 @@ ccbunshin launch provider1 -p "hello world"
 
 ## Shell integration
 
-`ccbunshin init bash`, `ccbunshin init zsh`, and `ccbunshin init tcsh` print a wrapper that routes `claude` through the nearest `.ccbunshin-profile` project:
+`ccbunshin init` (no args) detects `~/.bashrc`, `~/.zshrc`,
+`~/.tcshrc`/`~/.cshrc` and appends the matching wrapper hook to each file that
+exists, printing per-file status (`installed:` / `ok: already hooks` /
+`skip: not found`) to stdout. Re-running is idempotent.
+
+The manual alternative - `ccbunshin init bash`, `ccbunshin init zsh`, and
+`ccbunshin init tcsh` - print a wrapper that routes `claude` through the nearest `.ccbunshin-profile` project:
 
 ```sh
 eval "$(ccbunshin init bash)"
@@ -74,12 +80,13 @@ The profile directory has mode `700`; profile files have mode `600`. Authenticat
 ## Proxy lifecycle
 
 ```sh
+ccbunshin proxy init [--force]
 ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy stop
 ```
 
-Set `CCBUNSHIN_PROXY_CONFIG` to choose the JSON config. If unset, the command uses:
+`proxy init` writes a template config (mode `600`); `--force` overwrites an existing file. Set `CCBUNSHIN_PROXY_CONFIG` to choose the JSON config. If unset, the command uses:
 
 ```text
 ~/.config/ccbunshin/proxy.json
@@ -92,7 +99,15 @@ The process stores its PID and log at:
 ~/.cache/ccbunshin/proxy.log
 ```
 
-The proxy listens on the configured port, reads the request model, applies the ordered glob routes, optionally rewrites the model, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
+Routes select the provider; `models` rewrites the model ID after routing.
+
+The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), optionally rewrites the model via the provider's `models` map, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
+
+`proxy.json` keys:
+
+- `port` (required, 1-65535): the port the proxy listens on.
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream.
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected.
 
 ## systemd
 

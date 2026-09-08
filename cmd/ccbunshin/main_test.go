@@ -417,3 +417,100 @@ func TestListEmptyModel(t *testing.T) {
 		t.Errorf("list output = %q, want model=sonnet", output)
 	}
 }
+
+func TestInitAutoInstallsShellHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+
+	bashrc := home + "/.bashrc"
+	zshrc := home + "/.zshrc"
+	tcshrc := home + "/.tcshrc"
+	if err := os.WriteFile(bashrc, []byte("# existing\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// zshrc missing, should be skipped
+	// tcshrc exists
+	if err := os.WriteFile(tcshrc, []byte("# existing\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if err := initCLI(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, line := range []string{"installed: " + bashrc, "skip: " + zshrc, "installed: " + tcshrc} {
+		if !strings.Contains(output, line) {
+			t.Errorf("stdout missing %q; got %q", line, output)
+		}
+	}
+
+	bashrcData, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bashrcData), "eval \"$(ccbunshin init bash)\"") {
+		t.Errorf("bashrc missing bash hook:\n%s", bashrcData)
+	}
+
+	tcshrcData, err := os.ReadFile(tcshrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tcshrcData), "eval `ccbunshin init tcsh`") {
+		t.Errorf("tcshrc missing tcsh hook:\n%s", tcshrcData)
+	}
+}
+
+func TestInitIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+
+	bashrc := home + "/.bashrc"
+	if err := os.WriteFile(bashrc, []byte("# existing\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// run init twice
+	if err := initCLI(); err != nil {
+		t.Fatal(err)
+	}
+	if err := initCLI(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := strings.Count(string(data), "ccbunshin init bash")
+	if count != 1 {
+		t.Errorf("bashrc has %d hooks, want 1:\n%s", count, data)
+	}
+}
+
+func TestProxyInitWritesTemplate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", home+"/proxy.json")
+
+	if err := runCLI([]string{"proxy", "init"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(home + "/proxy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(home + "/proxy.json"); err != nil {
+		t.Fatalf("template failed validation: %v\n%s", err, data)
+	}
+	if err := runCLI([]string{"proxy", "init"}); err == nil {
+		t.Fatal("second init without --force succeeded")
+	}
+	if err := runCLI([]string{"proxy", "init", "--force"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI([]string{"proxy", "init", "extra"}); err == nil {
+		t.Fatal("init with extra arg succeeded")
+	}
+}

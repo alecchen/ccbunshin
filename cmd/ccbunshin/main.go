@@ -392,6 +392,59 @@ func proxyBinary() string {
 func pidPath() string { return path.Join(proxyStateDir(), "proxy.pid") }
 func logPath() string { return path.Join(proxyStateDir(), "proxy.log") }
 
+// proxyInitTemplate is the starting point written by `ccbunshin proxy init`.
+// Upstreams use reserved example.invalid hosts; replace them with real URLs.
+const proxyInitTemplate = `{
+  "port": 3456,
+  "providers": {
+    "provider1": {
+      "upstream": "https://sdc-gateway.example.invalid",
+      "models": {
+        "claude-opus-4-1": "claude-opus-4-1"
+      }
+    },
+    "provider2": {
+      "upstream": "https://free-gateway.example.invalid"
+    }
+  },
+  "routes": [
+    {
+      "pattern": "claude-*",
+      "provider": "provider1"
+    },
+    {
+      "pattern": "deepseek-v4-flash",
+      "provider": "provider2"
+    },
+    {
+      "pattern": "qwen-3.8-27b",
+      "provider": "provider2"
+    },
+    {
+      "pattern": "gpt-oss-120b",
+      "provider": "provider2"
+    }
+  ]
+}
+`
+
+func proxyInit(force bool) error {
+	cfg := proxyConfigPath()
+	if !force {
+		if _, err := os.Stat(cfg); err == nil {
+			return fmt.Errorf("proxy config exists: %s (use --force to overwrite)", cfg)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(cfg, []byte(proxyInitTemplate), 0600); err != nil {
+		return err
+	}
+	fmt.Printf("wrote proxy template: %s\n", cfg)
+	return nil
+}
+
 func profileModel(file string) string {
 	data, err := os.ReadFile(file)
 	if err != nil {
@@ -492,6 +545,44 @@ func initCLI() error {
 		return err
 	}
 	fmt.Printf("Initialized profile directory: %s\n", dir)
+	return installShellHooks()
+}
+
+func installShellHooks() error {
+	hooks := []struct{ file, shell, line string }{
+		{".bashrc", "bash", `eval "$(ccbunshin init bash)"`},
+		{".zshrc", "zsh", `eval "$(ccbunshin init zsh)"`},
+		{".tcshrc", "tcsh", "eval `ccbunshin init tcsh`"},
+		{".cshrc", "tcsh", "eval `ccbunshin init tcsh`"},
+	}
+	for _, hook := range hooks {
+		rc := path.Join(home(), hook.file)
+		if _, err := os.Stat(rc); errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("skip: %s not found\n", rc)
+			continue
+		}
+		data, err := os.ReadFile(rc)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), "ccbunshin init "+hook.shell) {
+			fmt.Printf("ok: %s already hooks %s\n", rc, hook.shell)
+			continue
+		}
+		file, err := os.OpenFile(rc, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(file, "\n# ccbunshin project-aware claude wrapper\n%s\n", hook.line)
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		fmt.Printf("installed: %s hooks %s\n", rc, hook.shell)
+	}
 	return nil
 }
 func deleteProfile(name string) error {
@@ -843,7 +934,7 @@ Commands:
   status <name>                    show a profile path and model
   doctor <name>                    check a profile for missing keys
   delete <name>                    delete a profile
-  proxy <start|stop|status>        manage the model-routed proxy
+  proxy <init|start|stop|status>   manage the model-routed proxy
   update                           update to the latest release
   help [<command>]                 show help, or help for one command
 
@@ -855,7 +946,10 @@ func commandHelp(name string) (string, bool) {
 	case "init":
 		return `usage: ccbunshin init [bash|zsh|tcsh]
 
-With no argument, create ~/.claude-profiles (mode 700) and print its path.
+With no argument, create ~/.claude-profiles (mode 700), append the wrapper
+hook to each of ~/.bashrc, ~/.zshrc, ~/.tcshrc, ~/.cshrc that exists (missing
+files are skipped, already-hooked files are left alone), and print per-file
+status to stdout.
 With a shell name, print a wrapper that routes "claude" through the nearest
 .ccbunshin-profile project; eval it from your shell rc:
 
@@ -912,11 +1006,12 @@ Warn about missing "env", "hooks", or "model" keys in the profile.
 Remove ~/.claude-profiles/<name>.json.
 `, true
 	case "proxy":
-		return `usage: ccbunshin proxy <start|stop|status>
+		return `usage: ccbunshin proxy <init|start|stop|status> [--force]
 
 Manage the model-routed proxy in the background. The config comes from
 $CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json; PID and log
-are stored in ~/.cache/ccbunshin/.
+are stored in ~/.cache/ccbunshin/. init writes a proxy.json template;
+--force overwrites an existing file.
 `, true
 	case "update":
 		return `usage: ccbunshin update
@@ -1051,9 +1146,15 @@ func runCLI(args []string) error {
 		return uninstallCLI()
 	case "proxy":
 		if len(args) < 2 {
-			return usageError("proxy", "proxy requires start, stop, or status")
+			return usageError("proxy", "proxy requires init, start, stop, or status")
 		}
 		switch args[1] {
+		case "init":
+			force := len(args) > 2 && args[2] == "--force"
+			if len(args) > 2 && !force || len(args) > 3 {
+				return usageError("proxy", "proxy init takes only --force")
+			}
+			return proxyInit(force)
 		case "start":
 			return proxyStart()
 		case "stop":
