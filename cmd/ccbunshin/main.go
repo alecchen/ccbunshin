@@ -376,7 +376,6 @@ func resolveProviderCLI() error {
 	return nil
 }
 
-func proxyStateDir() string { return path.Join(home(), ".cache", "ccbunshin") }
 func proxyConfigPath() string {
 	if value := os.Getenv("CCBUNSHIN_PROXY_CONFIG"); value != "" {
 		return value
@@ -389,8 +388,14 @@ func proxyBinary() string {
 	}
 	return os.Args[0]
 }
-func pidPath() string { return path.Join(proxyStateDir(), "proxy.pid") }
-func logPath() string { return path.Join(proxyStateDir(), "proxy.log") }
+func proxyConfigDir() string {
+	if value := os.Getenv("CCBUNSHIN_PROXY_CONFIG"); value != "" {
+		return filepath.Dir(value)
+	}
+	return path.Join(home(), ".config", "ccbunshin")
+}
+func pidPath() string { return path.Join(proxyConfigDir(), "proxy.pid") }
+func logPath() string { return path.Join(proxyConfigDir(), "proxy.log") }
 
 // proxyInitTemplate is the starting point written by `ccbunshin proxy init`.
 // Upstreams use reserved example.invalid hosts; replace them with real URLs.
@@ -708,7 +713,7 @@ func proxyStart() error {
 	if _, err := loadConfig(cfg); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(proxyStateDir(), 0700); err != nil {
+	if err := os.MkdirAll(proxyConfigDir(), 0700); err != nil {
 		return err
 	}
 	logFile, err := os.OpenFile(logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -1019,7 +1024,7 @@ Remove ~/.claude-profiles/<name>.json.
 
 Manage the model-routed proxy in the background. The config comes from
 $CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json; PID and log
-are stored in ~/.cache/ccbunshin/. init writes a proxy.json template;
+are stored in ~/.config/ccbunshin/. init writes a proxy.json template;
 --force overwrites an existing file.
 `, true
 	case "update":

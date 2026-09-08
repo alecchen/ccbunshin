@@ -96,8 +96,8 @@ ccbunshin proxy stop
 The process stores its PID and log at:
 
 ```text
-~/.cache/ccbunshin/proxy.pid
-~/.cache/ccbunshin/proxy.log
+~/.config/ccbunshin/proxy.pid
+~/.config/ccbunshin/proxy.log
 ```
 
 Routes select the provider; `models` rewrites the model ID after routing.
