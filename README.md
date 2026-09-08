@@ -16,11 +16,13 @@ The installer downloads the newest GitHub release for Linux or macOS on amd64 or
 
 Update an installed binary later with `ccbunshin update`, which checks the latest release, prints the current and latest versions when an update is available, and replaces the binary in place.
 
-Initialize the profile directory. This creates `~/.claude-profiles/` if needed and prints the directory path:
+Set up ccbunshin. This creates `~/.claude-profiles/` if needed and installs the project-aware `claude` wrapper into each shell rc file that exists:
 
 ```sh
 ccbunshin init
 # Initialized profile directory: /Users/you/.claude-profiles
+# installed: /Users/you/.bashrc hooks bash
+# skip: /Users/you/.zshrc not found
 ```
 
 ## Profiles
