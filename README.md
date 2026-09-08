@@ -22,7 +22,9 @@ Set up ccbunshin. This creates `~/.claude-profiles/` if needed and installs the 
 ccbunshin init
 # Initialized profile directory: /Users/you/.claude-profiles
 # installed: /Users/you/.bashrc hooks bash
-# skip: /Users/you/.zshrc not found
+# installed: /Users/you/.zshrc hooks zsh
+# skip: /Users/you/.tcshrc not found
+# skip: /Users/you/.cshrc not found
 ```
 
 ## Profiles
@@ -92,7 +94,7 @@ ccbunshin local provider1
 ccbunshin launch
 ```
 
-This writes `.ccbunshin-profile` in the current directory. `ccbunshin launch` searches the current directory and then its parents. An explicit profile takes precedence over the local file. Inspect or clear the current local selection with:
+This writes a `.ccbunshin-profile` marker in the current directory. `ccbunshin launch` searches the current directory and its parents, with the nearest marker taking precedence. An explicit profile takes precedence over the local file. This project-local selection model is inspired by [rbenv](https://github.com/rbenv/rbenv)/[pyenv](https://github.com/pyenv/pyenv)'s local version model. Inspect or clear the current local selection with:
 
 ```sh
 ccbunshin local
@@ -140,9 +142,16 @@ Outside a project, `claude` runs the original Claude Code command with the origi
 
 The wrapper reuses the existing `.ccbunshin-profile` marker created by `ccbunshin local <name>`; it introduces no new project marker. Bash and zsh define a `claude` shell function, tcsh an alias, so re-running eval is safe but replaces any `claude` function or alias you defined yourself. The original Claude Code binary remains callable and is what runs outside projects.
 
-## Model routing
+## Model routing (optional)
 
-The proxy exposes one endpoint for the LeanCTX flow. Both profiles can point to it. The proxy reads the model in each request and uses the route rules in `examples/proxy.json`.
+The proxy is optional. Each profile can already set its own
+`ANTHROPIC_BASE_URL`, so point profiles directly at different endpoints
+when you can.
+
+Use the proxy when you need a single endpoint. For example, a single
+lean-ctx proxy instance only has one Anthropic upstream. Point all
+profiles at the ccbunshin proxy, and it routes each request to a
+different endpoint based on the model ID and the rules in `proxy.json`.
 
 ```text
 ccbunshin :3456
