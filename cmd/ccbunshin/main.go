@@ -388,14 +388,19 @@ func proxyBinary() string {
 	}
 	return os.Args[0]
 }
-func proxyConfigDir() string {
-	if value := os.Getenv("CCBUNSHIN_PROXY_CONFIG"); value != "" {
-		return filepath.Dir(value)
-	}
-	return path.Join(home(), ".config", "ccbunshin")
-}
-func pidPath() string { return path.Join(proxyConfigDir(), "proxy.pid") }
-func logPath() string { return path.Join(proxyConfigDir(), "proxy.log") }
+
+// proxyStateDir holds the proxy pid and log. It is deliberately independent of
+// where the config lives: the config can sit in a read-only directory (the
+// systemd unit uses /etc/ccbunshin/proxy.json), which is not a place to write
+// state, and a relative CCBUNSHIN_PROXY_CONFIG would otherwise put the pid and
+// log in whatever directory the command was run from.
+func proxyStateDir() string { return path.Join(home(), ".config", "ccbunshin") }
+func pidPath() string       { return path.Join(proxyStateDir(), "proxy.pid") }
+func logPath() string       { return path.Join(proxyStateDir(), "proxy.log") }
+
+// legacyPidPath is where releases before the move to proxyStateDir wrote the
+// pid, so a proxy started by an older binary can still be found and stopped.
+func legacyPidPath() string { return path.Join(home(), ".cache", "ccbunshin", "proxy.pid") }
 
 // proxyInitTemplate is the starting point written by `ccbunshin proxy init`.
 // Upstreams use reserved example.invalid hosts; replace them with real URLs.
@@ -705,15 +710,19 @@ func runProjectClaude(args []string) error {
 	return runExec(command)
 }
 
+// proxyStartGrace is how long proxy start waits for the daemon to prove it
+// stayed up; the proxy binds its port right after exec.
+const proxyStartGrace = 500 * time.Millisecond
+
 func proxyStart() error {
-	if _, err := os.Stat(pidPath()); err == nil {
-		return fmt.Errorf("proxy may already be running; use status")
+	if _, pid, running := proxyRunningPID(); running {
+		return fmt.Errorf("proxy already running (pid %d); use status", pid)
 	}
 	cfg := proxyConfigPath()
 	if _, err := loadConfig(cfg); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(proxyConfigDir(), 0700); err != nil {
+	if err := os.MkdirAll(proxyStateDir(), 0700); err != nil {
 		return err
 	}
 	logFile, err := os.OpenFile(logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -728,27 +737,61 @@ func proxyStart() error {
 		return err
 	}
 	_ = logFile.Close()
-	return os.WriteFile(pidPath(), []byte(strconv.Itoa(command.Process.Pid)), 0600)
+	pidFile := pidPath()
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(command.Process.Pid)), 0600); err != nil {
+		return err
+	}
+	// The daemon binds its port after exec, so a child that dies right away
+	// (port already in use, unusable upstream) is reported as a failure
+	// instead of leaving a pid file pointing at a process that is already gone.
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		_ = os.Remove(pidFile)
+		reason := "exited"
+		if err != nil {
+			reason = err.Error()
+		}
+		return fmt.Errorf("proxy failed to start: %s (see %s)", reason, logPath())
+	case <-time.After(proxyStartGrace):
+		return nil
+	}
 }
-func proxyPID() (int, error) {
-	data, err := os.ReadFile(pidPath())
+func readPID(file string) (int, error) {
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return 0, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid < 1 {
-		return 0, fmt.Errorf("invalid proxy pid")
+		return 0, fmt.Errorf("invalid proxy pid in %s", file)
 	}
 	return pid, nil
 }
-func proxyStatus() error {
-	pid, err := proxyPID()
-	if err != nil {
-		fmt.Println("proxy stopped")
-		return nil
+
+// proxyRunningPID returns the pid file and pid of a live proxy. It also finds a
+// proxy started by a release that still wrote its pid under ~/.cache, so an
+// upgrade can stop the daemon it inherited. A pid file whose process is gone is
+// removed rather than reported, so a crash or reboot cannot wedge proxy start.
+func proxyRunningPID() (string, int, bool) {
+	for _, file := range []string{pidPath(), legacyPidPath()} {
+		pid, err := readPID(file)
+		if err != nil {
+			continue
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil || process.Signal(syscall.Signal(0)) != nil {
+			_ = os.Remove(file)
+			continue
+		}
+		return file, pid, true
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil || process.Signal(syscall.Signal(0)) != nil {
+	return "", 0, false
+}
+func proxyStatus() error {
+	_, pid, running := proxyRunningPID()
+	if !running {
 		fmt.Println("proxy stopped")
 		return nil
 	}
@@ -756,20 +799,20 @@ func proxyStatus() error {
 	return nil
 }
 func proxyStop() error {
-	pid, err := proxyPID()
-	if err != nil {
+	pidFile, pid, running := proxyRunningPID()
+	if !running {
 		fmt.Println("proxy stopped")
 		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		_ = os.Remove(pidPath())
+		_ = os.Remove(pidFile)
 		return nil
 	}
 	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
-	_ = os.Remove(pidPath())
+	_ = os.Remove(pidFile)
 	fmt.Println("proxy stopped")
 	return nil
 }
@@ -1023,9 +1066,9 @@ Remove ~/.claude-profiles/<name>.json.
 		return `usage: ccbunshin proxy <init|start|stop|status> [--force]
 
 Manage the model-routed proxy in the background. The config comes from
-$CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json; PID and log
-are stored in ~/.config/ccbunshin/. init writes a proxy.json template;
---force overwrites an existing file.
+$CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json. PID and log
+always live in ~/.config/ccbunshin/, whatever the config path is. init writes a
+proxy.json template; --force overwrites an existing file.
 `, true
 	case "update":
 		return `usage: ccbunshin update

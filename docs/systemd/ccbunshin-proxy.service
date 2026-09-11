@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ccbunshin proxy --server
+ExecStart=/usr/local/bin/ccbunshin --proxy-server
 Environment=CCBUNSHIN_PROXY_CONFIG=/etc/ccbunshin/proxy.json
 Restart=on-failure
 RestartSec=5

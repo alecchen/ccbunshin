@@ -100,6 +100,17 @@ The process stores its PID and log at:
 ~/.config/ccbunshin/proxy.log
 ```
 
+The PID and log always live there, whatever `CCBUNSHIN_PROXY_CONFIG` points at:
+the config directory is not assumed to be writable, and a relative config path
+does not make the state paths relative.
+
+`proxy start` launches the daemon detached and returns once the daemon has stayed
+up past startup, so a proxy that cannot bind exits non-zero with the log path
+instead of reporting success. It refuses to start a second daemon while one is
+running, and clears a stale PID file left by a crash or reboot rather than
+refusing to start. `status` and `stop` also find a proxy started by a release
+that wrote its PID under `~/.cache/ccbunshin`.
+
 Routes select the provider; `models` rewrites the model ID after routing.
 
 The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), optionally rewrites the model via the provider's `models` map, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.

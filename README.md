@@ -175,6 +175,11 @@ export CCBUNSHIN_PROXY_CONFIG=/path/to/proxy.json
 ccbunshin proxy start
 ```
 
+The PID and log live in `~/.config/ccbunshin/`, whatever the config path is.
+`proxy start` exits non-zero and points at the log when the proxy cannot start
+(for example the port is already in use); `proxy status` and `proxy stop` need
+no arguments and read that same state.
+
 Routes select the provider; `models` rewrites the model ID after routing.
 
 A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` matches any run of characters (`"claude-*"` matches `claude-sonnet-4-5`). Routes are checked in order; the first match wins. Once routed, the provider's `models` map optionally replaces the request's model ID with the upstream's ID before forwarding. Provider URLs and model rewrites belong in the JSON config. Authentication stays in Claude Code settings and environment variables, not in the proxy config.

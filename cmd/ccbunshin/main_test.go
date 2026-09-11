@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -533,5 +535,222 @@ func TestProxyInitWritesTemplate(t *testing.T) {
 	}
 	if err := runCLI([]string{"proxy", "init", "extra"}); err == nil {
 		t.Fatal("init with extra arg succeeded")
+	}
+}
+
+// proxyStub writes an executable that stands in for the proxy daemon: keepAlive
+// leaves it running until it is signalled, otherwise it exits at once with the
+// given status.
+func proxyStub(t *testing.T, keepAlive bool, status int) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "stub.sh")
+	body := "#!/bin/sh\nexit " + strconv.Itoa(status) + "\n"
+	if keepAlive {
+		body = "#!/bin/sh\nsleep 30\n"
+	}
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func writeProxyTestConfig(t *testing.T, file string) {
+	t.Helper()
+	config := `{"port": 3456, "providers": {"provider1": {"upstream": "https://gateway.example.invalid"}}}`
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The state directory must not follow CCBUNSHIN_PROXY_CONFIG: a relative value
+// would resolve against the working directory, and an absolute one can be a
+// read-only system location like /etc/ccbunshin.
+func TestProxyStatePathsIgnoreConfigLocation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".config", "ccbunshin")
+	for _, config := range []string{
+		"proxy.json",
+		filepath.Join(home, "repo", "proxy.json"),
+		"/etc/ccbunshin/proxy.json",
+	} {
+		t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+		for _, got := range []string{pidPath(), logPath()} {
+			if !filepath.IsAbs(got) {
+				t.Errorf("config %q gave relative state path %q", config, got)
+			}
+			if filepath.Dir(got) != want {
+				t.Errorf("config %q put state in %q, want %q", config, filepath.Dir(got), want)
+			}
+		}
+	}
+}
+
+// A relative config path used to make the pid and log land in the working
+// directory, where status and stop run from anywhere else cannot see them.
+func TestProxyStartKeepsStateOutOfWorkingDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := t.TempDir()
+	chdirT(t, work)
+	writeProxyTestConfig(t, filepath.Join(work, "proxy.json"))
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", "proxy.json")
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, true, 0))
+
+	if err := proxyStart(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxyStop() })
+
+	for _, name := range []string{"proxy.pid", "proxy.log"} {
+		if _, err := os.Stat(filepath.Join(work, name)); err == nil {
+			t.Errorf("proxy start wrote %s into the working directory", name)
+		}
+	}
+	if _, err := os.Stat(pidPath()); err != nil {
+		t.Fatalf("state not written to %s: %v", pidPath(), err)
+	}
+	output := captureStdout(t, func() {
+		if err := proxyStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy running") {
+		t.Errorf("proxyStatus = %q, want running", output)
+	}
+}
+
+// A config outside the user's own writable space (the systemd unit uses
+// /etc/ccbunshin/proxy.json) must not stop the proxy from starting.
+func TestProxyStartWithReadOnlyConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := t.TempDir()
+	config := filepath.Join(configDir, "proxy.json")
+	writeProxyTestConfig(t, config)
+	if err := os.Chmod(configDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0700) })
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, true, 0))
+
+	if err := proxyStart(); err != nil {
+		t.Fatalf("proxy start with a read-only config directory: %v", err)
+	}
+	t.Cleanup(func() { _ = proxyStop() })
+	if _, err := os.Stat(pidPath()); err != nil {
+		t.Fatalf("state not written to %s: %v", pidPath(), err)
+	}
+}
+
+// A daemon that dies during startup (port in use, unusable upstream) used to be
+// reported as a successful start, leaving a pid file for a dead process.
+func TestProxyStartReportsDaemonThatExitsImmediately(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := filepath.Join(home, "proxy.json")
+	writeProxyTestConfig(t, config)
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, false, 1))
+
+	err := proxyStart()
+	if err == nil {
+		t.Fatal("proxy start reported success although the daemon exited immediately")
+	}
+	if !strings.Contains(err.Error(), logPath()) {
+		t.Errorf("error %q does not point at the log %s", err, logPath())
+	}
+	if _, statErr := os.Stat(pidPath()); statErr == nil {
+		t.Error("pid file left behind for a daemon that already exited")
+	}
+}
+
+// A pid file for a process that is gone (crash, reboot, SIGKILL) must not block
+// the next start, and start and status must agree about what is running.
+func TestProxyStartRecoversFromStalePidFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := filepath.Join(home, "proxy.json")
+	writeProxyTestConfig(t, config)
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, true, 0))
+
+	dead := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(proxyStateDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath(), []byte(strconv.Itoa(dead.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := proxyStart(); err != nil {
+		t.Fatalf("stale pid file blocked start: %v", err)
+	}
+	t.Cleanup(func() { _ = proxyStop() })
+	output := captureStdout(t, func() {
+		if err := proxyStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy running") {
+		t.Errorf("proxyStatus after start = %q, want running", output)
+	}
+}
+
+// State moved from ~/.cache/ccbunshin to ~/.config/ccbunshin, so a proxy left
+// running by an older binary has to stay reachable.
+func TestProxyStopFindsProxyFromLegacyStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDir := filepath.Join(home, ".cache", "ccbunshin")
+	if err := os.MkdirAll(legacyDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	daemon := exec.Command(proxyStub(t, true, 0))
+	if err := daemon.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = daemon.Process.Kill()
+		_ = daemon.Wait()
+	})
+	legacyPid := filepath.Join(legacyDir, "proxy.pid")
+	if err := os.WriteFile(legacyPid, []byte(strconv.Itoa(daemon.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := proxyStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy running") {
+		t.Errorf("proxyStatus with a legacy pid file = %q, want running", output)
+	}
+
+	output = captureStdout(t, func() {
+		if err := proxyStop(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy stopped") {
+		t.Errorf("proxyStop = %q, want stopped", output)
+	}
+	if _, err := os.Stat(legacyPid); err == nil {
+		t.Error("legacy pid file left behind after stop")
+	}
+	done := make(chan error, 1)
+	go func() { done <- daemon.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("legacy proxy still running after stop")
 	}
 }
