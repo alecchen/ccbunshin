@@ -342,7 +342,9 @@ On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at b
 
 - `cmd/ccbunshin/` contains the Go CLI and model-routed proxy.
 - `examples/` contains profile and proxy config examples.
-- `docs/` contains architecture and deployment notes.
+- `docs/` contains architecture and deployment notes. Pointers for the two gateways the proxy is
+  tested against: [docs/OPENCODE_ZEN.md](docs/OPENCODE_ZEN.md) and
+  [docs/OPENCODE_GO.md](docs/OPENCODE_GO.md), each listing which models need which dialect.
 
 See [cmd/ccbunshin/README.md](cmd/ccbunshin/README.md) for command and proxy details.
 

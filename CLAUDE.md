@@ -40,6 +40,12 @@ build from that directory.
   for anything dialect-related.
 - `docs/PLAN_CACHE_USAGE_PASSTHROUGH.md` - why usage reporting is split the way it is
   (decision 9 in `docs/DECISIONS.md`), and the upstream facts that split rests on.
+- `docs/PLAN_RESPONSES_DIALECT_AND_TOOL_SEARCH.md` - planned work: a third dialect for OpenAI's
+  Responses API, and what tool search (`ENABLE_TOOL_SEARCH`) does through the proxy. Read before
+  changing dialect handling or tool translation.
+- `docs/OPENCODE_ZEN.md` and `docs/OPENCODE_GO.md` - reference: the endpoint shape of those two
+  gateways, which models each serves, and which dialect each group needs. Dated snapshots; re-verify
+  against the live tables before trusting a model id.
 - `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
   documentation.
 
