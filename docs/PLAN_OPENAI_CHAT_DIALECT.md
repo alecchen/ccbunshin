@@ -150,7 +150,7 @@ Deployment config this targets, using the repo's `example.invalid` convention:
   "port": 3456,
   "providers": {
     "provider2": {
-      "upstream": "https://free-gateway.example.invalid/provider/v1",
+      "upstream": "https://provider2.example.invalid/provider/v1",
       "dialect": "openai-chat",
       "default_model": "oss-model"
     }

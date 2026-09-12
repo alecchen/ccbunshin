@@ -2,13 +2,13 @@
   "port": 3456,
   "providers": {
     "provider1": {
-      "upstream": "https://sdc-gateway.example.invalid",
+      "upstream": "https://provider1.example.invalid",
       "models": {
         "claude-opus-4-1": "claude-opus-4-1"
       }
     },
     "provider2": {
-      "upstream": "https://free-gateway.example.invalid",
+      "upstream": "https://provider2.example.invalid",
       "dialect": "openai-chat",
       "default_model": "oss-model"
     }
