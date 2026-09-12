@@ -2,8 +2,6 @@
 
 **ccbunshin** (分身, *bunshin*, "shadow clone") runs several Claude Code profiles side by side. Each profile has its own settings, while Claude Code state stays shared.
 
-MIT licensed. See [LICENSE](LICENSE).
-
 ## Install
 
 Install the latest published release:
@@ -347,3 +345,7 @@ On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at b
 - `docs/` contains architecture and deployment notes.
 
 See [cmd/ccbunshin/README.md](cmd/ccbunshin/README.md) for command and proxy details.
+
+## License
+
+MIT licensed. See [LICENSE](LICENSE).
