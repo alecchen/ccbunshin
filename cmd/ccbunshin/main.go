@@ -1402,9 +1402,12 @@ func compareVersions(a, b string) int {
 	return 0
 }
 
+// githubAPIBase is a variable so tests can point release lookups at a stub.
+var githubAPIBase = "https://api.github.com"
+
 func latestReleaseTag(repo string) (string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
-	response, err := client.Get("https://api.github.com/repos/" + repo + "/releases/latest")
+	response, err := client.Get(githubAPIBase + "/repos/" + repo + "/releases/latest")
 	if err != nil {
 		return "", err
 	}
@@ -1452,25 +1455,63 @@ func downloadRelease(repo, tag, file string) error {
 	return closeErr
 }
 
-func updateCLI() error {
+// replaceable reports whether path is a real file we can rename over. A binary
+// produced by "go run" lives in an ephemeral toolchain directory instead.
+func replaceable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func updateCLI(args []string) error {
+	force := false
+	switch {
+	case len(args) == 0:
+	case len(args) == 1 && args[0] == "--force":
+		force = true
+	default:
+		return usageError("update", "update takes no arguments or --force")
+	}
 	repo := updateRepo()
 	current := strings.TrimSpace(version)
 	latest, err := latestReleaseTag(repo)
 	if err != nil {
 		return err
 	}
-	if current == "" {
-		fmt.Printf("installed version is unknown (not a release build); latest is %s - reinstall with install.sh\n", latest)
-		return nil
+	// Everything below needs an executable on disk to rename over. A source
+	// build run with "go run" has none, and its parent directory is the
+	// toolchain's temp dir, so replaceBinary's temp file could land anywhere.
+	if current == "" || !replaceable(os.Args[0]) {
+		local := localVersion()
+		if local == "" {
+			local = "unknown build"
+		}
+		if current == "" && !force {
+			fmt.Printf("this is not a release build (%s); latest release is %s\n", local, latest)
+			fmt.Println("use --force to replace it")
+			return nil
+		}
+		return replaceBinary(repo, latest, fmt.Sprintf("this is a local build (%s), replacing with %s\n", local, latest))
 	}
 	if compareVersions(current, latest) >= 0 {
 		fmt.Printf("already up to date (current %s)\n", current)
 		return nil
 	}
-	fmt.Printf("current is %s, latest is %s, updating to %s\n", current, latest, latest)
+	return replaceBinary(repo, latest, fmt.Sprintf("current is %s, latest is %s, updating to %s\n", current, latest, latest))
+}
+
+// replaceBinary downloads the latest release over the running binary, printing
+// message first. It is the shared tail of updateCLI.
+func replaceBinary(repo, latest, message string) error {
+	fmt.Print(message)
 	executable, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	// A binary replaced by "go build -o", or by an earlier update, can be
+	// reached through a PATH symlink; rewriting it would leave the symlink
+	// pointing at the old target.
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(executable), ".ccbunshin-update-*")
 	if err != nil {
@@ -1510,7 +1551,7 @@ Commands:
   delete <name>                    delete a profile
   uninstall                        remove the shell hooks init installed
   proxy <init|start|stop|status>   manage the model-routed proxy
-  update                           update to the latest release
+  update [--force]                 update to the latest release
   version                          print the binary version
   help [<command>]                 show help, or help for one command
 
@@ -1612,10 +1653,12 @@ always live in ~/.config/ccbunshin/, whatever the config path is. init writes a
 proxy.json template; --force overwrites an existing file.
 `, true
 	case "update":
-		return `usage: ccbunshin update
+		return `usage: ccbunshin update [--force]
 
 Check the latest GitHub release (repo from $CCBUNSHIN_REPO, default
 alecchen/ccbunshin) and replace this binary in place when a newer tag exists.
+A source build carries no release tag, so it reports the latest tag and stops;
+--force replaces it anyway, turning the checkout into a release install.
 `, true
 	case "version":
 		return `usage: ccbunshin version
@@ -1784,7 +1827,7 @@ func runCLI(args []string) error {
 	case "run":
 		return runProjectClaude(args[1:])
 	case "update":
-		return updateCLI()
+		return updateCLI(args[1:])
 	case "version":
 		if len(args) != 1 {
 			return usageError("version", "version takes no arguments")

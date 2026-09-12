@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -594,6 +595,8 @@ func TestRunCLIUsageErrors(t *testing.T) {
 		{"global", "a", "b"},
 		{"global"},
 		{"launch"},
+		{"update", "--bogus"},
+		{"update", "--force", "extra"},
 		{"bogus"},
 		{"help", "bogus"},
 	}
@@ -1039,4 +1042,71 @@ func TestProxyStopFindsProxyFromLegacyStateDir(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Error("legacy proxy still running after stop")
 	}
+}
+
+// TestUpdateRefusesUnreplaceableBuild covers the branch a source build hits:
+// no release tag and no binary on disk to rename over (what "go run" sees), so
+// update reports the latest tag and changes nothing unless --force is given.
+func TestUpdateRefusesUnreplaceableBuild(t *testing.T) {
+	savedVersion, savedTime, savedArgs0 := version, buildTime, os.Args[0]
+	t.Cleanup(func() { version, buildTime, os.Args[0] = savedVersion, savedTime, savedArgs0 })
+
+	fakeGitHub(t, `{"tag_name":"v9.9.9"}`)
+	version = ""
+	buildTime = "20260912-1200"
+	os.Args[0] = filepath.Join(t.TempDir(), "ccbunshin-that-does-not-exist")
+
+	output := captureStdout(t, func() {
+		if err := runCLI([]string{"update"}); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+	})
+	if !strings.Contains(output, "not a release build") || !strings.Contains(output, "v9.9.9") {
+		t.Errorf("update output = %q, want the not-a-release-build notice naming v9.9.9", output)
+	}
+	if !strings.Contains(output, "--force") {
+		t.Errorf("update output = %q, want it to mention --force", output)
+	}
+
+	// --force proceeds past the guard and fails at the download, not earlier.
+	err := runCLI([]string{"update", "--force"})
+	if err == nil {
+		t.Fatal("update --force = nil, want a download failure from the stub server")
+	}
+	if strings.Contains(err.Error(), "not a release build") {
+		t.Errorf("update --force stopped at the guard: %v", err)
+	}
+}
+
+func TestReplaceableRejectsMissingFile(t *testing.T) {
+	if replaceable(filepath.Join(t.TempDir(), "absent")) {
+		t.Error("replaceable(absent) = true, want false")
+	}
+	real := filepath.Join(t.TempDir(), "ccbunshin")
+	if err := os.WriteFile(real, []byte("x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !replaceable(real) {
+		t.Errorf("replaceable(%s) = false, want true", real)
+	}
+	if replaceable(t.TempDir()) {
+		t.Error("replaceable(dir) = true, want false")
+	}
+}
+
+// fakeGitHub points latestReleaseTag at a stub serving one release payload.
+func fakeGitHub(t *testing.T, payload string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, payload)
+	}))
+	t.Cleanup(server.Close)
+	// latestReleaseTag hard-codes api.github.com, so redirect through a test
+	// override of the base URL rather than DNS.
+	githubAPIBase = server.URL
+	t.Cleanup(func() { githubAPIBase = "https://api.github.com" })
 }

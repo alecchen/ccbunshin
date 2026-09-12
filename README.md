@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/alecchen/ccbunshin/main/install.sh 
 
 The installer downloads the newest GitHub release for Linux or macOS on amd64 or arm64, so publishing a release needs no installer change. Set `CCBUNSHIN_VERSION` to pin a specific release (for example `CCBUNSHIN_VERSION=v0.0.3 sh install.sh`), or `CCBUNSHIN_INSTALL_DIR` to choose another directory.
 
-Update an installed binary later with `ccbunshin update`, which checks the latest release, prints the current and latest versions when an update is available, and replaces the binary in place.
+Update an installed binary later with `ccbunshin update`, which checks the latest release, prints the current and latest versions when an update is available, and replaces the binary in place. A local source build carries no release tag, so `update` prints the latest tag and stops; `ccbunshin update --force` replaces it with the release binary anyway.
 
 Set up ccbunshin. This creates `~/.claude-profiles/` if needed and installs the project-aware `claude` wrapper into each shell rc file that exists:
 
@@ -76,7 +76,7 @@ ccbunshin proxy init [--force]
 ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy stop
-ccbunshin update
+ccbunshin update [--force]
 ccbunshin version
 ```
 
