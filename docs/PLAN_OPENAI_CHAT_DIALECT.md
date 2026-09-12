@@ -71,7 +71,8 @@ re-verifying against any new upstream; the host, plan names, and model ids are n
    present, otherwise convert inbound `x-api-key` into `Authorization: Bearer <value>` and drop
    `x-api-key`. No credential is read from or written to config, which keeps
    `docs/Claude Code Multi-Endpoint - Shared State Architecture Requirements.md:418`
-   ("Authentication is not part of the proxy config") and CLAUDE.md decision 4 ("ccbunshin never
+   ("Authentication is not part of the proxy config") and decision 4 in
+   `docs/DECISIONS.md` ("ccbunshin never
    reads or writes credentials") intact.
 2. **`count_tokens`**: answered locally with a character-based estimate, but **only** when the
    routed provider's dialect is `openai-chat`. An `anthropic` dialect provider keeps forwarding
