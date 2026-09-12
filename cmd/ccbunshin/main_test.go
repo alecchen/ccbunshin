@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,6 +106,164 @@ func TestHealthz(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy.test/healthz", nil))
 	if response.Code != http.StatusOK || response.Body.String() != "ok\n" {
 		t.Fatalf("health response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+// --- logging ---
+
+func TestParseLogLevel(t *testing.T) {
+	cases := map[string]logLevel{
+		"":        levelInfo,
+		"info":    levelInfo,
+		"INFO":    levelInfo,
+		" info ":  levelInfo,
+		"debug":   levelDebug,
+		"Debug":   levelDebug,
+		"warn":    levelWarn,
+		"warning": levelWarn,
+		"error":   levelError,
+	}
+	for value, want := range cases {
+		got, err := parseLogLevel(value)
+		if err != nil || got != want {
+			t.Errorf("parseLogLevel(%q) = %v, %v; want %v", value, got, err, want)
+		}
+	}
+	if _, err := parseLogLevel("verbose"); err == nil {
+		t.Fatal("an unknown level was accepted instead of reported")
+	}
+}
+
+// capturer installs a collecting logger for one test and restores the old one, so the
+// threshold and the output both start from a known state.
+func capturer(t *testing.T, level logLevel) *bytes.Buffer {
+	t.Helper()
+	previousOutput, previousFlags, previousThreshold := log.Writer(), log.Flags(), logThreshold
+	buffer := &bytes.Buffer{}
+	log.SetOutput(buffer)
+	log.SetFlags(0)
+	logThreshold = level
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		logThreshold = previousThreshold
+	})
+	return buffer
+}
+
+func TestLogThresholdFiltersLines(t *testing.T) {
+	buffer := capturer(t, levelWarn)
+	logf(levelDebug, "debug line")
+	logf(levelInfo, "info line")
+	logf(levelWarn, "warn line")
+	logf(levelError, "error line")
+
+	output := buffer.String()
+	for _, dropped := range []string{"debug line", "info line"} {
+		if strings.Contains(output, dropped) {
+			t.Errorf("%q was written below the threshold: %s", dropped, output)
+		}
+	}
+	for _, kept := range []string{"WARN warn line", "ERROR error line"} {
+		if !strings.Contains(output, kept) {
+			t.Errorf("%q was not written: %s", kept, output)
+		}
+	}
+}
+
+// The default level keeps the proxy's own startup line, which is what an unconfigured
+// run has always logged.
+func TestDefaultLevelKeepsStartupLine(t *testing.T) {
+	buffer := capturer(t, levelInfo)
+	logf(levelInfo, "proxy listening on port %d", 3456)
+	if !strings.Contains(buffer.String(), "INFO proxy listening on port 3456") {
+		t.Fatalf("log = %q", buffer.String())
+	}
+}
+
+func TestRequestLogLineNamesModelProviderAndDialect(t *testing.T) {
+	upstream, err := url.Parse("https://gw.example.invalid/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := requestPlan{
+		requestedModel: "claude-opus-5",
+		targetModel:    "oss-model",
+		dialect:        dialectOpenAIChat,
+		providerName:   "provider2",
+		provider:       loadedProvider{upstream: upstream},
+	}
+	line := requestLogLine(plan, http.StatusOK, 1234, 1500*time.Millisecond)
+	for _, want := range []string{"claude-opus-5 -> oss-model", "buffered", "provider=provider2", "dialect=openai-chat", "status=200", "bytes=1234", "elapsed=1.5s"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line %q is missing %q", line, want)
+		}
+	}
+}
+
+// A credential in the upstream URL must not reach the log, which is the one line
+// carrying the upstream address.
+func TestRequestLogLineRedactsCredentials(t *testing.T) {
+	upstream, err := url.Parse("https://user:sekret@gw.example.invalid/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := requestPlan{requestedModel: "m", targetModel: "m", provider: loadedProvider{upstream: upstream}}
+	if line := requestLogLine(plan, http.StatusOK, 0, time.Second); strings.Contains(line, "sekret") {
+		t.Fatalf("credential leaked into the log line: %s", line)
+	}
+}
+
+// A completed request is logged even at the default level, which is the point of the
+// whole exercise: the old log said nothing about a request at all.
+func TestRequestIsLoggedAtDefaultLevel(t *testing.T) {
+	buffer := capturer(t, levelInfo)
+	handler := &proxy{}
+	handler.logRequest(requestPlan{requestedModel: "m", targetModel: "m"}, http.StatusOK, 10, time.Now())
+	if !strings.Contains(buffer.String(), "INFO proxy:") {
+		t.Fatalf("log = %q", buffer.String())
+	}
+}
+
+// A 5xx is the signal that something is wrong with the gateway, so it is the one
+// request line that survives CCBUNSHIN_LOG=error.
+func TestFailedRequestIsLoggedAtErrorLevel(t *testing.T) {
+	buffer := capturer(t, levelError)
+	handler := &proxy{}
+	handler.logRequest(requestPlan{requestedModel: "m", targetModel: "m"}, http.StatusBadGateway, 0, time.Now())
+	if !strings.Contains(buffer.String(), "ERROR proxy:") {
+		t.Fatalf("log = %q", buffer.String())
+	}
+}
+
+// A pass-through upstream can answer 5xx without any other failure to report, so the
+// request line is the only thing a reader gets. It must carry the status.
+func TestPassThroughUpstreamErrorIsLogged(t *testing.T) {
+	buffer := capturer(t, levelInfo)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gateway exploded", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"provider1": testProvider(t, upstream, nil)},
+			routes:    []loadedRoute{{pattern: "opus", provider: "provider1"}},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"opus"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.Code)
+	}
+	logged := buffer.String()
+	for _, want := range []string{"ERROR proxy: opus -> opus", "provider=provider1", "status=500"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log %q is missing %q", logged, want)
+		}
 	}
 }
 

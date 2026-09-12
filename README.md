@@ -199,7 +199,12 @@ ccbunshin proxy start
 The PID and log live in `~/.config/ccbunshin/`, whatever the config path is.
 `proxy start` exits non-zero and points at the log when the proxy cannot start
 (for example the port is already in use); `proxy status` and `proxy stop` need
-no arguments and read that same state.
+no arguments and read that same state. `CCBUNSHIN_LOG` sets the log threshold:
+`debug`, `info` (the default), `warn`, or `error`. The default level logs one
+line per request - model in, model out, provider, dialect, status, bytes,
+elapsed - and `debug` adds the routing decision, the upstream URL, and the
+upstream's usage counts per streamed message. See `cmd/ccbunshin/README.md` for
+what each level covers.
 
 Routes select the provider; `models` rewrites the model ID after routing.
 
@@ -325,10 +330,13 @@ Run the Go checks and the shell integration tests:
 ```sh
 gofmt -w cmd/ccbunshin/*.go
 go -C cmd/ccbunshin vet ./...
-go -C cmd/ccbunshin test ./...
+go -C cmd/ccbunshin test ./...   # includes the log-level and per-request-log tests
 sh tests/shell-integration.sh
 sh tests/install-test.sh
 ```
+
+To check the log end to end against a real request, start the proxy with
+`CCBUNSHIN_LOG=debug` and read `~/.config/ccbunshin/proxy.log`.
 
 On Linux, `docs/systemd/ccbunshin-proxy.service` shows how to run the proxy at boot with automatic restarts. For a user-local process, use `ccbunshin proxy start`, `status`, and `stop`.
 

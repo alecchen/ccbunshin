@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 )
@@ -137,8 +136,9 @@ func (s *streamTranslator) closeBlock() {
 func (s *streamTranslator) appendReasoning(text string) {
 	if s.state == stateText || s.state == stateTool {
 		// Late reasoning cannot be ordered before an open block without breaking
-		// Anthropic block ordering, so it is dropped rather than interleaved.
-		log.Printf("proxy: dropping reasoning that arrived after content began")
+		// Anthropic block ordering, so it is dropped rather than interleaved. It is
+		// a warning rather than debug because the caller never sees this content.
+		logf(levelWarn, "proxy: dropping reasoning that arrived after content began")
 		return
 	}
 	if s.state != stateThinking {
@@ -255,6 +255,12 @@ func (s *streamTranslator) finish() {
 	}
 	if s.usage != nil {
 		usage = anthropicUsageFromUpstream(s.usage)
+		// The upstream's own count, which supersedes the local estimate above. This
+		// is the line that shows whether prompt caching is actually hitting.
+		logf(levelDebug, "proxy: %s usage prompt=%d completion=%d cached=%d",
+			s.requestedModel, s.usage.PromptTokens, s.usage.CompletionTokens, s.usage.cachedTokens())
+	} else {
+		logf(levelDebug, "proxy: %s stream ended with no usage report; reporting the estimate", s.requestedModel)
 	}
 	s.emit("message_delta", map[string]any{
 		"type": "message_delta",

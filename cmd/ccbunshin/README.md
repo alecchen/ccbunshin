@@ -119,6 +119,29 @@ running, and clears a stale PID file left by a crash or reboot rather than
 refusing to start. `status` and `stop` also find a proxy started by a release
 that wrote its PID under `~/.cache/ccbunshin`.
 
+### Log severity
+
+`CCBUNSHIN_LOG` sets the threshold for `proxy.log`, lowest to highest:
+`debug`, `info` (the default), `warn`, `error`. A line is written when its own
+level is at or above the threshold, so `error` leaves only failures. Any other
+value is an error: a typo fails `proxy start` instead of silently logging
+nothing.
+
+Each line carries its level after the timestamp:
+
+```text
+2026/09/12 23:25:40 INFO proxy: claude-opus-5 -> oss-model (buffered) provider=provider2 dialect=openai-chat status=200 bytes=271 elapsed=1ms
+2026/09/12 23:25:40 WARN proxy: POST /v1/messages from 127.0.0.1:62779 failed: no provider route for model nope
+```
+
+- **info** (default): one line per request with the requested and target model, provider, dialect, status, response bytes, and elapsed time, plus one line at startup and one at shutdown.
+- **warn**: requests the proxy itself rejects (no route, unreadable body) and reasoning dropped mid-stream.
+- **error**: upstream failures (unreachable, non-2xx, untranslatable response), a stream cut short after its headers were already sent, and any request whose response was 5xx.
+- **debug**: the routing decision and the upstream URL for each request, translated request size, and upstream usage per streamed message, including the cache hit count (`cached=`); this is the level that shows whether prompt caching is hitting.
+
+Credentials are never logged: URLs in the log are redacted, and no request or
+response body is written at any level. `debug` is the most verbose setting.
+
 Routes select the provider; `models` rewrites the model ID after routing.
 
 The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
@@ -206,6 +229,14 @@ go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh
 sh tests/install-test.sh
 ```
+
+`main_test.go` covers the log levels directly: `TestParseLogLevel` for
+`CCBUNSHIN_LOG`, and `TestLogThresholdFiltersLines`, `TestRequestLogLineNamesModelProviderAndDialect`,
+`TestRequestLogLineRedactsCredentials`, `TestPassThroughUpstreamErrorIsLogged`,
+and `TestFailedRequestIsLoggedAtErrorLevel` for what each level writes.
+End to end, start the proxy with `CCBUNSHIN_LOG=debug`, send one request, and
+read `~/.config/ccbunshin/proxy.log`: a line per request plus the routing and
+usage lines.
 
 ## Compatibility review
 

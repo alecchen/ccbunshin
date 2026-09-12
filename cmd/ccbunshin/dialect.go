@@ -52,6 +52,7 @@ type requestPlan struct {
 	targetModel    string // what goes upstream
 	dialect        dialect
 	provider       loadedProvider
+	providerName   string // the provider key, which the loaded provider does not carry
 	isStreaming    bool
 	inputTokens    int    // local estimate, surfaced before the upstream reports usage
 	effortDefault  string // reasoning_effort applied when the caller sent none; "" for none
@@ -114,6 +115,7 @@ func (c loadedConfig) planFor(model string) (requestPlan, bool) {
 			targetModel:    target,
 			dialect:        d,
 			provider:       p,
+			providerName:   item.provider,
 			effortDefault:  effort,
 		}, true
 	}

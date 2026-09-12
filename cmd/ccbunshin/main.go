@@ -232,21 +232,25 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		logf(levelWarn, "proxy: %s %s from %s failed: cannot read request body", r.Method, r.URL.RequestURI(), r.RemoteAddr)
 		http.Error(w, "failed to read request", http.StatusBadRequest)
 		return
 	}
 	model, err := requestModel(body)
 	if err != nil {
+		logf(levelWarn, "proxy: %s %s from %s failed: %s", r.Method, r.URL.RequestURI(), r.RemoteAddr, err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	plan, ok := p.config.planFor(model)
 	if !ok {
+		logf(levelWarn, "proxy: %s %s from %s failed: no provider route for model %s", r.Method, r.URL.RequestURI(), r.RemoteAddr, model)
 		http.Error(w, "no provider route for model", http.StatusBadRequest)
 		return
 	}
+	logf(levelDebug, "proxy: %s %s model=%s routes to provider=%s dialect=%s", r.Method, r.URL.RequestURI(), model, plan.providerName, plan.dialect)
 	if r.URL.Path == "/v1/messages/count_tokens" && plan.dialect == dialectOpenAIChat {
-		p.serveCountTokens(w, body)
+		p.serveCountTokens(w, body, plan)
 		return
 	}
 	client := p.client
@@ -261,7 +265,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body = rewriteModel(body, plan.provider.models)
-	p.serveAnthropic(w, r, body, plan.provider, client)
+	p.serveAnthropic(w, r, body, plan, client)
 }
 
 // requestIsStreaming reports whether the caller asked for an SSE response.
@@ -357,12 +361,15 @@ func (p *proxy) routeTableJSON() []byte {
 
 // serveAnthropic forwards an Anthropic-dialect request unchanged. This is the behavior
 // every pre-dialect config expects, and it must stay byte-for-byte.
-func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []byte, provider loadedProvider, client *http.Client) {
+func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
+	started := time.Now()
+	provider := plan.provider
 	target := *provider.upstream
 	target.Path = strings.TrimRight(target.Path, "/") + "/" + strings.TrimLeft(r.URL.Path, "/")
 	target.RawQuery = r.URL.RawQuery
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed: cannot build upstream request: %s", plan.requestedModel, target.Redacted(), err)
 		http.Error(w, "failed to create upstream request", http.StatusBadGateway)
 		return
 	}
@@ -370,17 +377,32 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 	request.Header.Del("Host")
 	response, err := client.Do(request)
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed after %s: %s", plan.requestedModel, target.Redacted(), time.Since(started).Round(time.Millisecond), err)
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if flusher, ok := w.(http.Flusher); ok {
-		_, _ = io.Copy(flushingWriter{w, flusher}, response.Body)
-		return
+	counter := &countingWriter{writer: w}
+	if flusher := flushWriter(w); flusher != nil {
+		_, _ = io.Copy(flushingWriter{counter, flusher}, response.Body)
+	} else {
+		_, _ = io.Copy(counter, response.Body)
 	}
-	_, _ = io.Copy(w, response.Body)
+	p.logRequest(plan, response.StatusCode, counter.bytes, started)
+}
+
+// logRequest writes one line per completed request. A 5xx summary is an error, not a
+// warning: it is the only record for a pass-through upstream that answered 500, and
+// CCBUNSHIN_LOG=error has to keep those visible. The specific cause, where there is one,
+// is logged at its own call site alongside this line.
+func (p *proxy) logRequest(plan requestPlan, status int, bytes int64, started time.Time) {
+	level := levelInfo
+	if status >= 500 {
+		level = levelError
+	}
+	logf(level, "%s", requestLogLine(plan, status, bytes, time.Since(started)))
 }
 
 // serveOpenAIChat translates an Anthropic messages request onto an upstream
@@ -388,11 +410,14 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 // are deliberately not copied: the body no longer matches the encoding or length it
 // described.
 func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
+	started := time.Now()
 	translated, err := translateAnthropicRequest(body, plan.targetModel, plan.effortDefault)
 	if err != nil {
+		logf(levelWarn, "proxy: %s -> %s failed: cannot translate request: %s", plan.requestedModel, plan.targetModel, err)
 		writeTranslatedError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	logf(levelDebug, "proxy: translated request for %s -> %s is %d bytes of openai-chat", plan.requestedModel, plan.targetModel, len(translated))
 	target := *plan.provider.upstream
 	target.Path = strings.TrimRight(target.Path, "/") + "/chat/completions"
 	// The inbound query belongs to the Anthropic endpoint (?beta=true); it means
@@ -400,55 +425,65 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	target.RawQuery = ""
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target.String(), bytes.NewReader(translated))
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed: cannot build upstream request: %s", plan.requestedModel, target.Redacted(), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to create upstream request")
 		return
 	}
 	applyOpenAIChatHeaders(request.Header, r.Header)
 	response, err := client.Do(request)
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed after %s: %s", plan.requestedModel, target.Redacted(), time.Since(started).Round(time.Millisecond), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "upstream unavailable")
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		p.serveTranslatedError(w, response)
+		p.serveTranslatedError(w, response, plan, started)
 		return
 	}
 	if plan.isStreaming {
-		p.serveTranslatedStream(w, response, plan)
+		p.serveTranslatedStream(w, response, plan, started)
 		return
 	}
 	upstreamBody, err := io.ReadAll(response.Body)
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed: cannot read upstream response: %s", plan.requestedModel, target.Redacted(), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to read upstream response")
 		return
 	}
 	out, err := translateOpenAIResponse(upstreamBody, plan.requestedModel)
 	if err != nil {
+		logf(levelError, "proxy: %s -> %s failed: cannot translate response (%d upstream bytes): %s", plan.requestedModel, target.Redacted(), len(upstreamBody), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	applyTranslatedResponseHeaders(w.Header(), false)
 	w.WriteHeader(response.StatusCode)
-	_, _ = w.Write(out)
+	counter := &countingWriter{writer: w}
+	_, _ = counter.Write(out)
+	p.logRequest(plan, response.StatusCode, counter.bytes, started)
 }
 
 // serveTranslatedStream writes the translated SSE body. The status is committed before
 // the first byte, so an error past this point can only be reported in band.
-func (p *proxy) serveTranslatedStream(w http.ResponseWriter, response *http.Response, plan requestPlan) {
+func (p *proxy) serveTranslatedStream(w http.ResponseWriter, response *http.Response, plan requestPlan, started time.Time) {
 	applyTranslatedResponseHeaders(w.Header(), true)
 	w.WriteHeader(response.StatusCode)
-	flusher, _ := w.(http.Flusher)
-	translator := newStreamTranslator(w, flusher, plan.requestedModel, plan.inputTokens)
+	counter := &countingWriter{writer: w}
+	translator := newStreamTranslator(counter, flushWriter(w), plan.requestedModel, plan.inputTokens)
 	if err := translator.run(response.Body); err != nil {
+		// The status was already delivered as a success, so this is the only record
+		// that the caller's stream was cut short.
+		logf(levelError, "proxy: %s -> %s stream failed after %s: %s", plan.requestedModel, plan.targetModel, time.Since(started).Round(time.Millisecond), err)
 		translator.emitError(err.Error())
 	}
+	p.logRequest(plan, response.StatusCode, counter.bytes, started)
 }
 
 // serveTranslatedError rewraps an upstream error in the Anthropic envelope. Claude Code
 // classifies errors on that shape, so forwarding the OpenAI body verbatim would be
 // misread. Keeping the upstream's message is what makes a wrong dialect mapping legible.
-func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Response) {
+func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Response, plan requestPlan, started time.Time) {
 	message := ""
 	if raw, err := io.ReadAll(io.LimitReader(response.Body, 64*1024)); err == nil {
 		var parsed struct {
@@ -470,22 +505,28 @@ func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Respo
 	if message == "" {
 		message = http.StatusText(response.StatusCode)
 	}
+	logf(levelError, "proxy: %s -> %s upstream rejected the request with %d after %s: %s",
+		plan.requestedModel, plan.targetModel, response.StatusCode, time.Since(started).Round(time.Millisecond), message)
 	writeTranslatedError(w, response.StatusCode, anthropicErrorTypeForStatus(response.StatusCode), message)
 }
 
 // serveCountTokens answers Anthropic's token count locally. The upstream 404s on this
 // path, and Claude Code asks for a count at startup, so an estimate answers the question
 // the caller actually has.
-func (p *proxy) serveCountTokens(w http.ResponseWriter, body []byte) {
+func (p *proxy) serveCountTokens(w http.ResponseWriter, body []byte, plan requestPlan) {
+	started := time.Now()
 	count := estimateRequestTokens(body)
 	encoded, err := json.Marshal(map[string]int{"input_tokens": count})
 	if err != nil {
 		writeTranslatedError(w, http.StatusInternalServerError, "api_error", "failed to encode token count")
 		return
 	}
+	logf(levelDebug, "proxy: %s count_tokens answered locally with an estimate of %d", plan.requestedModel, count)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(encoded)
+	counter := &countingWriter{writer: w}
+	_, _ = counter.Write(encoded)
+	p.logRequest(plan, http.StatusOK, counter.bytes, started)
 }
 
 func requestModel(body []byte) (string, error) {
@@ -501,6 +542,8 @@ func requestModel(body []byte) (string, error) {
 	return payload.Model, nil
 }
 
+// flushingWriter flushes after every write, so a pass-through stream reaches the client
+// as it arrives.
 type flushingWriter struct {
 	writer  io.Writer
 	flusher http.Flusher
@@ -511,6 +554,40 @@ func (w flushingWriter) Write(data []byte) (int, error) {
 	w.flusher.Flush()
 	return n, err
 }
+
+// countingWriter counts what passed through it. Wrapping the client writer rather than
+// counting what was read from the upstream keeps the tally to bytes actually delivered:
+// a translation error mid-stream, or a client that disconnected, shows up in the number
+// instead of being hidden by it.
+type countingWriter struct {
+	writer io.Writer
+	bytes  int64
+}
+
+func (w *countingWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.bytes += int64(n)
+	return n, err
+}
+
+// flushWriter reports whether a writer can flush an SSE stream.
+func flushWriter(w io.Writer) http.Flusher {
+	flusher, _ := w.(http.Flusher)
+	return flusher
+}
+
+// requestLogLine names the model, provider, and dialect only: no credentials, no request
+// body, and no response body.
+func requestLogLine(plan requestPlan, status int, bytes int64, elapsed time.Duration) string {
+	shape := "buffered"
+	if plan.isStreaming {
+		shape = "stream"
+	}
+	return fmt.Sprintf("proxy: %s -> %s (%s) provider=%s dialect=%s status=%d bytes=%d elapsed=%s",
+		plan.requestedModel, plan.targetModel, shape, plan.providerName, plan.dialect,
+		status, bytes, elapsed.Round(time.Millisecond))
+}
+
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
 		if strings.EqualFold(key, "Host") {
@@ -553,6 +630,11 @@ func rewriteModelTo(body []byte, target string) []byte {
 }
 
 func runServer(ctx context.Context, cfg loadedConfig) error {
+	level, err := parseLogLevel(os.Getenv(logEnv))
+	if err != nil {
+		return err
+	}
+	logThreshold = level
 	server := &http.Server{Addr: ":" + strconv.Itoa(cfg.port), Handler: &proxy{config: cfg, client: &http.Client{}}}
 	go func() {
 		<-ctx.Done()
@@ -560,9 +642,10 @@ func runServer(ctx context.Context, cfg loadedConfig) error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.Printf("proxy listening on port %d", cfg.port)
-	err := server.ListenAndServe()
+	logf(levelInfo, "proxy listening on port %d (providers=%d routes=%d log=%s)", cfg.port, len(cfg.providers), len(cfg.routes), level)
+	err = server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
+		logf(levelInfo, "proxy stopped")
 		return nil
 	}
 	return err
@@ -799,6 +882,10 @@ func proxyBinary() string {
 	}
 	return os.Args[0]
 }
+
+// logEnv selects the proxy's log severity. It is read by the CLI (so a bad value fails
+// before a daemon is spawned) and by the daemon itself.
+const logEnv = "CCBUNSHIN_LOG"
 
 // proxyStateDir holds the proxy pid and log. It is deliberately independent of
 // where the config lives: the config can sit in a read-only directory (the
@@ -1193,6 +1280,11 @@ func runProjectClaude(args []string) error {
 const proxyStartGrace = 500 * time.Millisecond
 
 func proxyStart() error {
+	// Parsed here as well as in the daemon so a typo fails immediately instead of
+	// leaving a daemon that exits on startup holding a log nobody reads.
+	if _, err := parseLogLevel(os.Getenv(logEnv)); err != nil {
+		return err
+	}
 	if _, pid, running := proxyRunningPID(); running {
 		return fmt.Errorf("proxy already running (pid %d); use status", pid)
 	}
@@ -1208,7 +1300,12 @@ func proxyStart() error {
 		return err
 	}
 	command := exec.Command(proxyBinary(), "--proxy-server")
-	command.Env = append(os.Environ(), "CCBUNSHIN_PROXY_CONFIG="+cfg)
+	// os.Environ already carries CCBUNSHIN_LOG when it is set. It is restated explicitly
+	// so the level the CLI just validated is the level the daemon runs at.
+	command.Env = append(os.Environ(),
+		"CCBUNSHIN_PROXY_CONFIG="+cfg,
+		logEnv+"="+os.Getenv(logEnv),
+	)
 	command.Stdout, command.Stderr = logFile, logFile
 	if err := command.Start(); err != nil {
 		_ = logFile.Close()
@@ -1854,6 +1951,9 @@ func runCLI(args []string) error {
 }
 
 func main() {
+	if _, err := parseLogLevel(os.Getenv(logEnv)); err != nil {
+		log.Fatal(err)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--proxy-server" {
 		cfg, err := loadConfig(proxyConfigPath())
 		if err != nil {
