@@ -304,7 +304,10 @@ text block would be rejected by an Anthropic-shaped client.
 
 `usage`: `prompt_tokens` to `input_tokens`, `completion_tokens` to `output_tokens`. Reasoning
 tokens are already included in `completion_tokens`, and Anthropic counts thinking in
-`output_tokens` too, so no adjustment. Cache token fields are omitted as unknowable.
+`output_tokens` too, so no adjustment. Cache hits are reported from
+`prompt_tokens_details.cached_tokens` as `cache_read_input_tokens`, subtracted out of
+`input_tokens` the way Anthropic reports them; `cache_creation_input_tokens` has no upstream
+counterpart and stays `0`. See `PLAN_CACHE_USAGE_PASSTHROUGH.md`.
 
 **Errors must be translated, not forwarded.** Claude Code's error classifier keys on the Anthropic
 envelope, so a raw OpenAI error body would be misread. A non-2xx upstream response is converted to
@@ -778,9 +781,10 @@ Claude Code session completes a tool-using turn, and no `reasoning_effort` reach
     the OSS upstream may cap lower and reject. Mitigation: pass through and surface the upstream
     error legibly via the error translation in section 4.4. A per-provider clamp is the obvious
     follow-up if it bites; adding config surface speculatively is worse than waiting for the error.
-11. **Prompt-cache semantics are lost.** `cache_control` breakpoints cannot be expressed to an
-    OpenAI-chat upstream, so every turn is a cold prefill. Acceptable here, but it should be
-    documented rather than discovered from a bill.
+11. **Prompt-cache semantics are partially lost.** `cache_control` breakpoints cannot be expressed
+    to an OpenAI-chat upstream, but such upstreams cache a repeated prefix automatically, so turns
+    are not cold prefills. Resolved: the hit count is reported as `cache_read_input_tokens`. See
+    `PLAN_CACHE_USAGE_PASSTHROUGH.md`.
 12. **Config typo silently means pass-through**, since there is no `DisallowUnknownFields`. An
     accepted tradeoff; the docs bullet is the mitigation.
 13. **Modest scope creep in `ServeHTTP`.** The branch is small, but the pass-through path must not
@@ -839,5 +843,6 @@ because it documents env vars and endpoint behavior that affect a gateway (it cu
 - `/v1/models` response translation
 - The reverse direction (OpenAI to Anthropic) and any provider other than OpenAI-chat
 - Retries, fallbacks, and spend accounting, which litellm provided and this does not
-- Prompt caching (`cache_control`) actually reaching the upstream
+- Prompt caching (`cache_control`) actually reaching the upstream. Automatic prefix caching is a
+  different mechanism and its hits are now surfaced; see `PLAN_CACHE_USAGE_PASSTHROUGH.md`.
 - Removing litellm from the machine; this change makes that safe, it does not do it

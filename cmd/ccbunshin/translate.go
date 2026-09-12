@@ -360,6 +360,45 @@ type reasoningPart struct {
 type openAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	// The upstream nests the prompt-cache hit count under details. Its spelling is the
+	// OpenAI one; a provider that names it differently reports no hits rather than
+	// failing.
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// cachedTokens is the prompt-cache hit count, 0 when the upstream reported none.
+func (u *openAIUsage) cachedTokens() int {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
+}
+
+// anthropicUsageFromUpstream converts an upstream usage report to Anthropic's fields.
+// Anthropic reports cache reads separately from input_tokens, so the hit count is
+// subtracted out; the clamp keeps a provider that counts hits inclusively from yielding a
+// negative input count. cache_creation_input_tokens has no upstream counterpart and is
+// always 0, but is emitted rather than omitted: a client computing
+// cache_read / (input + cache_creation + cache_read) reads a missing key as an error, not
+// as a zero. A nil report is all zeros.
+func anthropicUsageFromUpstream(usage *openAIUsage) map[string]any {
+	if usage == nil {
+		return map[string]any{
+			"input_tokens":                0,
+			"output_tokens":               0,
+			"cache_creation_input_tokens": 0,
+			"cache_read_input_tokens":     0,
+		}
+	}
+	cached := usage.cachedTokens()
+	return map[string]any{
+		"input_tokens":                max(usage.PromptTokens-cached, 0),
+		"output_tokens":               usage.CompletionTokens,
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     cached,
+	}
 }
 
 // reasoningText prefers the `reasoning` string and falls back to reasoning_details. The
@@ -427,7 +466,7 @@ func translateOpenAIResponse(body []byte, requestedModel string) ([]byte, error)
 	}
 	content := []any{}
 	stopReason := "end_turn"
-	usage := map[string]any{"input_tokens": 0, "output_tokens": 0}
+	usage := anthropicUsageFromUpstream(nil)
 
 	if len(response.Choices) > 0 {
 		choice := response.Choices[0]
@@ -456,8 +495,7 @@ func translateOpenAIResponse(body []byte, requestedModel string) ([]byte, error)
 		}
 	}
 	if response.Usage != nil {
-		usage["input_tokens"] = response.Usage.PromptTokens
-		usage["output_tokens"] = response.Usage.CompletionTokens
+		usage = anthropicUsageFromUpstream(response.Usage)
 	}
 
 	return json.Marshal(map[string]any{

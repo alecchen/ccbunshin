@@ -325,6 +325,9 @@ func TestStreamDoesNotDoubleCountReasoning(t *testing.T) {
 	}
 }
 
+// The upstream's usage is authoritative: its prompt_tokens replaces the local
+// estimate, and the cache fields it reports are passed through with the hit count
+// subtracted out of input_tokens, the way Anthropic reports them.
 func TestStreamUsageAndStopReason(t *testing.T) {
 	source := chunk(`{"choices":[{"delta":{"content":"hi"}}]}`) +
 		chunk(`{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":7,"completion_tokens":99}}`) +
@@ -336,8 +339,10 @@ func TestStreamUsageAndStopReason(t *testing.T) {
 			StopReason string `json:"stop_reason"`
 		} `json:"delta"`
 		Usage struct {
-			Input  int `json:"input_tokens"`
-			Output int `json:"output_tokens"`
+			Input         int `json:"input_tokens"`
+			Output        int `json:"output_tokens"`
+			CacheCreation int `json:"cache_creation_input_tokens"`
+			CacheRead     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	for _, event := range events {
@@ -353,9 +358,106 @@ func TestStreamUsageAndStopReason(t *testing.T) {
 	if final.Usage.Output != 99 {
 		t.Fatalf("output_tokens = %d, want the upstream's count", final.Usage.Output)
 	}
+	if final.Usage.Input != 7 {
+		t.Fatalf("input_tokens = %d, want the upstream's count over the estimate", final.Usage.Input)
+	}
+	if final.Usage.CacheCreation != 0 || final.Usage.CacheRead != 0 {
+		t.Fatalf("cache = %d/%d, want zero when the upstream reported no hits",
+			final.Usage.CacheCreation, final.Usage.CacheRead)
+	}
+}
+
+// With no usage chunk at all the estimate is all there is, and it must survive:
+// dropping it would report an input of zero on every such stream.
+func TestStreamFallsBackToEstimateWithoutUsage(t *testing.T) {
+	source := chunk(`{"choices":[{"delta":{"content":"hi"}}]}`) +
+		chunk(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	events := runStream(t, source)
+	var final struct {
+		Usage struct {
+			Input  int `json:"input_tokens"`
+			Output int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	for _, event := range events {
+		if event.Name == "message_delta" {
+			if json.Unmarshal([]byte(event.Data), &final) != nil {
+				t.Fatal("message_delta was not valid JSON")
+			}
+		}
+	}
 	if final.Usage.Input != 42 {
 		t.Fatalf("input_tokens = %d, want the local estimate", final.Usage.Input)
 	}
+	if final.Usage.Output == 0 {
+		t.Fatal("output_tokens = 0, want a count derived from what was emitted")
+	}
+}
+
+// A reported cache hit is split out of input_tokens, so the two together still
+// reconcile to the upstream's prompt_tokens.
+func TestStreamReportsCacheReadTokens(t *testing.T) {
+	source := chunk(`{"choices":[{"delta":{"content":"hi"}}]}`) +
+		chunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,`+
+			`"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":768}}}`) +
+		"data: [DONE]\n\n"
+
+	for _, event := range runStream(t, source) {
+		if event.Name != "message_delta" {
+			continue
+		}
+		var payload struct {
+			Usage struct {
+				Input         int `json:"input_tokens"`
+				CacheCreation int `json:"cache_creation_input_tokens"`
+				CacheRead     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(event.Data), &payload) != nil {
+			t.Fatal("message_delta was not valid JSON")
+		}
+		if payload.Usage.CacheRead != 768 {
+			t.Fatalf("cache_read_input_tokens = %d, want 768", payload.Usage.CacheRead)
+		}
+		if payload.Usage.CacheCreation != 0 {
+			t.Fatalf("cache_creation_input_tokens = %d, want 0", payload.Usage.CacheCreation)
+		}
+		if total := payload.Usage.Input + payload.Usage.CacheCreation + payload.Usage.CacheRead; total != 1000 {
+			t.Fatalf("input+cache = %d, want the upstream's prompt_tokens 1000", total)
+		}
+		return
+	}
+	t.Fatal("no message_delta in the stream")
+}
+
+// A provider that counts cache hits inclusively would otherwise make the
+// subtraction negative, which a client renders as a negative context figure.
+func TestStreamClampsInclusiveCacheCount(t *testing.T) {
+	source := chunk(`{"choices":[{"delta":{"content":"hi"}}]}`) +
+		chunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,`+
+			`"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":400}}}`) +
+		"data: [DONE]\n\n"
+
+	for _, event := range runStream(t, source) {
+		if event.Name != "message_delta" {
+			continue
+		}
+		var payload struct {
+			Usage struct {
+				Input int `json:"input_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(event.Data), &payload) != nil {
+			t.Fatal("message_delta was not valid JSON")
+		}
+		if payload.Usage.Input != 0 {
+			t.Fatalf("input_tokens = %d, want 0 rather than a negative count", payload.Usage.Input)
+		}
+		return
+	}
+	t.Fatal("no message_delta in the stream")
 }
 
 func TestStreamEmptyUpstream(t *testing.T) {
