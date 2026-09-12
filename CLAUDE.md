@@ -6,9 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ccbunshin (影分身, "shadow clone"): a dependency-free Go tool that runs several Claude Code
 configurations side by side - isolated configuration (endpoint, model, hooks) with shared
-state (projects, history, todos, skills). It is built around two LLM gateway profiles (the
-generic `free`/`paid` examples) and an optional model-routed proxy between them. It is
-implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0.0.x`.
+state (projects, history, todos, skills). It is built around two gateway profiles
+(`examples/provider1.json`, `examples/provider2.json`) and an optional model-routed proxy
+between them. It is implemented as a single Go binary in `cmd/ccbunshin` and released under
+tags `v0.0.x`.
+
+## Layout
+
+`cmd/ccbunshin/` is the whole program: `main.go` (CLI, config, proxy server, shell
+integration), `dialect.go` (dialect resolution), `translate.go` (request and response
+translation), `stream.go` (SSE translation). Tests sit beside those (`main_test.go`,
+`translate_test.go`, `stream_test.go`) with fixtures in `testdata/`. `docs/` holds the spec
+and the proxy Plan docs, `examples/` the profile and proxy templates, `tests/` the shell and
+installer scripts. There is no Go module at the repo root: always pass `-C cmd/ccbunshin`, or
+build from that directory.
 
 ## Repo docs (read the relevant one before editing)
 
@@ -23,6 +34,11 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
   implementation spec and the code.
 - `docs/CC_SWITCH_BASE_URL_PIN.md` - tangential note on pinning `ANTHROPIC_BASE_URL` against
   cc-switch rewrites via `--settings`.
+- `docs/PLAN_OPENAI_CHAT_DIALECT.md` - the openai-chat dialect in full: config surface,
+  translation rules, and its risk register. Supersedes section 10 of the implementation notes
+  for anything dialect-related.
+- `docs/PLAN_CACHE_USAGE_PASSTHROUGH.md` - why usage reporting is split the way it is
+  (decision 9), and the upstream facts that split rests on.
 - `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
   documentation.
 
@@ -35,9 +51,17 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
    `$HOME/.claude.json`) are never relocated - shared by construction.
    `CLAUDE_CONFIG_DIR` was rejected because it relocates state too, forcing a version-fragile
    symlink map.
-2. **Env blocks merge per-variable** (assumed; verify empirically before relying on it - see
-   spec section 9). Profile files define only what differs and inherit the rest of the user's
-   env block.
+2. **Env blocks merge per-variable, verified.** Two rules, and both matter: a variable set in
+   two files resolves to the higher-precedence one, and a variable set *only* in a lower file
+   survives - a higher file's `env` block does not blank the lower one. That is what lets a
+   profile name one variable and inherit the rest of the user's env block, which is the whole
+   premise of decision 1. Verified 2026-09-12 with a `SessionStart` hook dumping `env` from a
+   session launched with `--settings`: a probe variable set only in user settings and one set
+   only in `--settings` both reached the session, and a variable set in both resolved to the
+   `--settings` value. Note the published docs do not state the second rule - `settings.md`'s
+   "an `env` block inside a settings file is an ordinary key and follows the levels above"
+   plus "Lists merge instead of overriding" reads as wholesale replacement, which is wrong.
+   Re-probe rather than trusting that reading.
 3. **Isolation map**: `hooks`, `model`, `statusLine` are isolated per profile (wholesale key
    replacement; `hooks: {}` blanks company hooks). `permissions.allow` and other list keys
    merge across scopes - cannot subtract via `--settings`. Managed settings outrank
@@ -100,6 +124,7 @@ Every implementation change must include a way to verify the behavior. Add or up
 Verification commands for this repo:
 
 ```sh
+gofmt -w cmd/ccbunshin/*.go
 go -C cmd/ccbunshin vet ./...
 go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh   # project-aware claude wrapper across bash, zsh, tcsh
