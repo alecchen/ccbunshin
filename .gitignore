@@ -1,0 +1,7 @@
+# Build output: cmd/ccbunshin is the module root, so a plain
+# `go -C cmd/ccbunshin build -o ccbunshin` lands here, not at the repo root.
+cmd/ccbunshin/ccbunshin
+
+# Cross-compiled release binaries, built at the repo root.
+/ccbunshin-linux-amd64
+/ccbunshin-linux-arm64
