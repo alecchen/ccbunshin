@@ -30,9 +30,9 @@ func TestProviderForModel(t *testing.T) {
 			"paid": {},
 			"free": {},
 		},
-		routes: []route{
-			{Pattern: "claude-*", Provider: "paid"},
-			{Pattern: "qwen-3.8-27b", Provider: "free"},
+		routes: []loadedRoute{
+			{pattern: "claude-*", provider: "paid"},
+			{pattern: "qwen-3.8-27b", provider: "free"},
 		},
 	}
 	if _, ok := cfg.providerFor("claude-sonnet-4-5"); !ok {
@@ -68,7 +68,7 @@ func TestProxyForwardsRoutedRequest(t *testing.T) {
 		providers: map[string]loadedProvider{
 			"provider1": testProvider(t, upstream, map[string]string{"opus": "provider-model"}),
 		},
-		routes: []route{{Pattern: "opus", Provider: "provider1"}},
+		routes: []loadedRoute{{pattern: "opus", provider: "provider1"}},
 	}
 	handler := &proxy{config: cfg, client: upstream.Client()}
 	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages?x=1", strings.NewReader(`{"model":"opus"}`))
@@ -89,7 +89,7 @@ func TestProxyForwardsRoutedRequest(t *testing.T) {
 }
 
 func TestProxyRejectsUnroutedModel(t *testing.T) {
-	handler := &proxy{config: loadedConfig{routes: []route{}}, client: http.DefaultClient}
+	handler := &proxy{config: loadedConfig{routes: []loadedRoute{}}, client: http.DefaultClient}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"unknown"}`)))
 	if response.Code != http.StatusBadRequest {

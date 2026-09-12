@@ -28,23 +28,39 @@ type fileConfig struct {
 	Routes    []route             `json:"routes"`
 }
 type provider struct {
-	Upstream string            `json:"upstream"`
-	Timeout  string            `json:"timeout,omitempty"`
-	Models   map[string]string `json:"models,omitempty"`
+	Upstream     string            `json:"upstream"`
+	Timeout      string            `json:"timeout,omitempty"`
+	Models       map[string]string `json:"models,omitempty"`
+	Dialect      string            `json:"dialect,omitempty"`
+	DefaultModel string            `json:"default_model,omitempty"`
 }
 type route struct {
-	Pattern  string `json:"pattern"`
-	Provider string `json:"provider"`
+	Pattern       string            `json:"pattern"`
+	Provider      string            `json:"provider"`
+	Models        map[string]string `json:"models,omitempty"`
+	Dialect       string            `json:"dialect,omitempty"`
+	ModelDialects map[string]string `json:"model_dialects,omitempty"`
 }
 type loadedConfig struct {
 	port      int
 	providers map[string]loadedProvider
-	routes    []route
+	routes    []loadedRoute
+}
+type loadedRoute struct {
+	pattern       string
+	provider      string
+	models        map[string]string
+	dialect       dialect
+	configured    bool // whether dialect came from the config rather than the default
+	modelDialects map[string]dialect
 }
 type loadedProvider struct {
-	upstream *url.URL
-	timeout  time.Duration
-	models   map[string]string
+	upstream     *url.URL
+	timeout      time.Duration
+	models       map[string]string
+	dialect      dialect
+	defaultModel string
+	configured   bool // whether dialect came from the config rather than the default
 }
 type proxy struct {
 	config loadedConfig
@@ -82,9 +98,23 @@ func loadConfig(filename string) (loadedConfig, error) {
 				return loadedConfig{}, fmt.Errorf("provider %q timeout must be positive", name)
 			}
 		}
-		providers[name] = loadedProvider{upstream: upstream, timeout: timeout, models: value.Models}
+		d, err := parseDialect(fmt.Sprintf("provider %q", name), value.Dialect)
+		if err != nil {
+			return loadedConfig{}, err
+		}
+		providers[name] = loadedProvider{
+			upstream:     upstream,
+			timeout:      timeout,
+			models:       value.Models,
+			dialect:      d,
+			defaultModel: value.DefaultModel,
+			// Carried unset so the route layer can tell "not configured" from an
+			// explicit anthropic, which validateDialectTargets needs to reason about.
+			configured: value.Dialect != "",
+		}
 	}
 	seen := map[string]bool{}
+	routes := make([]loadedRoute, 0, len(raw.Routes))
 	for _, item := range raw.Routes {
 		if item.Pattern == "" || item.Provider == "" {
 			return loadedConfig{}, fmt.Errorf("routes require pattern and provider")
@@ -101,15 +131,73 @@ func loadConfig(filename string) (loadedConfig, error) {
 			}
 			seen[item.Pattern] = true
 		}
+		where := fmt.Sprintf("route %q", item.Pattern)
+		d, err := parseDialect(where, item.Dialect)
+		if err != nil {
+			return loadedConfig{}, err
+		}
+		modelDialects := make(map[string]dialect, len(item.ModelDialects))
+		for model, value := range item.ModelDialects {
+			md, err := parseDialect(fmt.Sprintf("%s model_dialects entry %q", where, model), value)
+			if err != nil {
+				return loadedConfig{}, err
+			}
+			modelDialects[model] = md
+		}
+		routes = append(routes, loadedRoute{
+			pattern:       item.Pattern,
+			provider:      item.Provider,
+			models:        item.Models,
+			dialect:       d,
+			configured:    item.Dialect != "",
+			modelDialects: modelDialects,
+		})
 	}
-	return loadedConfig{port: raw.Port, providers: providers, routes: raw.Routes}, nil
+	cfg := loadedConfig{port: raw.Port, providers: providers, routes: routes}
+	if err := validateDialectTargets(cfg); err != nil {
+		return loadedConfig{}, err
+	}
+	return cfg, nil
 }
 
+// validateDialectTargets rejects an openai-chat route that has nowhere to get a model id
+// the upstream will accept. Without a mapping, every routed Claude Code id would be
+// forwarded verbatim to an upstream that refuses it, so the mistake is caught at load
+// rather than one failed request at a time.
+//
+// Only configured values are consulted, never the anthropic default: a config that says
+// nothing about dialacts is a pass-through config, and its lack of a model mapping is
+// not an error.
+func validateDialectTargets(cfg loadedConfig) error {
+	for _, item := range cfg.routes {
+		p := cfg.providers[item.provider]
+		openAIChat := false
+		if item.configured {
+			openAIChat = item.dialect == dialectOpenAIChat
+		} else if p.configured {
+			openAIChat = p.dialect == dialectOpenAIChat
+		}
+		if !openAIChat {
+			continue
+		}
+		if len(item.models) > 0 || len(p.models) > 0 || p.defaultModel != "" {
+			continue
+		}
+		return fmt.Errorf(
+			"route %q uses dialect %q but has no model mapping: add default_model to the provider, or models to the provider or route",
+			item.pattern, dialectOpenAIChat,
+		)
+	}
+	return nil
+}
+
+// providerFor returns the first provider whose route matches, ignoring dialects. planFor
+// is what the request path uses; this stays for callers that only need the provider.
 func (c loadedConfig) providerFor(model string) (loadedProvider, bool) {
 	for _, item := range c.routes {
-		matched, _ := path.Match(item.Pattern, model)
+		matched, _ := path.Match(item.pattern, model)
 		if matched {
-			p, ok := c.providers[item.Provider]
+			p, ok := c.providers[item.provider]
 			return p, ok
 		}
 	}
@@ -123,6 +211,10 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 		return
 	}
+	if r.URL.Path == "/ccbunshin/resolve" {
+		p.serveResolve(w, r)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request", http.StatusBadRequest)
@@ -133,12 +225,124 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	provider, ok := p.config.providerFor(model)
+	plan, ok := p.config.planFor(model)
 	if !ok {
 		http.Error(w, "no provider route for model", http.StatusBadRequest)
 		return
 	}
-	body = rewriteModel(body, provider.models)
+	if r.URL.Path == "/v1/messages/count_tokens" && plan.dialect == dialectOpenAIChat {
+		p.serveCountTokens(w, body)
+		return
+	}
+	client := p.client
+	if plan.provider.timeout > 0 {
+		client = &http.Client{Timeout: plan.provider.timeout}
+	}
+	if plan.dialect == dialectOpenAIChat {
+		plan.isStreaming = requestIsStreaming(body)
+		plan.inputTokens = estimateRequestTokens(body)
+		body = rewriteModelTo(body, plan.targetModel)
+		p.serveOpenAIChat(w, r, body, plan, client)
+		return
+	}
+	body = rewriteModel(body, plan.provider.models)
+	p.serveAnthropic(w, r, body, plan.provider, client)
+}
+
+// requestIsStreaming reports whether the caller asked for an SSE response.
+func requestIsStreaming(body []byte) bool {
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return false
+	}
+	return payload.Stream
+}
+
+// serveResolve reports what a request model routes to. It is the proxy's own endpoint,
+// answered from the route table, and it exists because a client cannot otherwise know
+// which upstream model its model ID became: the model list of a real gateway does not
+// describe ccbunshin's glob routes.
+//
+// With no ?model= it returns the whole route table; with one it resolves that model, so a
+// statusline can ask "claude-opus-5 is what, exactly?" on each redraw.
+func (p *proxy) serveResolve(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	model := r.URL.Query().Get("model")
+	if model == "" {
+		_, _ = w.Write(p.routeTableJSON())
+		return
+	}
+	plan, ok := p.config.planFor(model)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"no route matches this model"}`))
+		return
+	}
+	_, _ = w.Write(resolvedModelJSON(plan))
+}
+
+// resolvedModelJSON is the flattened shape a statusline reads: the two IDs and the shape.
+func resolvedModelJSON(plan requestPlan) []byte {
+	encoded, err := json.Marshal(map[string]any{
+		"requested": plan.requestedModel,
+		"target":    plan.targetModel,
+		"dialect":   string(plan.dialect),
+	})
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return encoded
+}
+
+// planDialectFor reports a route's configured dialect, for display. It is deliberately
+// not the request-time resolution in planFor: with no model in hand there is no target
+// ID, so a model_dialects override cannot be applied and the route's own dialect answers.
+func planDialectFor(cfg loadedConfig, item loadedRoute) dialect {
+	if item.configured {
+		return item.dialect
+	}
+	if provider, ok := cfg.providers[item.provider]; ok && provider.configured {
+		return provider.dialect
+	}
+	return dialectAnthropic
+}
+
+// routeTableJSON lists the configured routes so a client can discover them without
+// parsing the config file.
+func (p *proxy) routeTableJSON() []byte {
+	routes := make([]map[string]any, 0, len(p.config.routes))
+	for _, item := range p.config.routes {
+		provider := p.config.providers[item.provider]
+		entry := map[string]any{
+			"pattern":  item.pattern,
+			"provider": item.provider,
+			"dialect":  string(planDialectFor(p.config, item)),
+		}
+		if provider.upstream != nil {
+			entry["upstream"] = provider.upstream.String()
+		}
+		if provider.defaultModel != "" {
+			entry["default_model"] = provider.defaultModel
+		}
+		if models := item.models; len(models) > 0 {
+			entry["models"] = models
+		} else if len(provider.models) > 0 {
+			entry["models"] = provider.models
+		}
+		routes = append(routes, entry)
+	}
+	encoded, err := json.Marshal(map[string]any{"routes": routes})
+	if err != nil {
+		return []byte(`{"routes":[]}`)
+	}
+	return encoded
+}
+
+// serveAnthropic forwards an Anthropic-dialect request unchanged. This is the behavior
+// every pre-dialect config expects, and it must stay byte-for-byte.
+func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []byte, provider loadedProvider, client *http.Client) {
 	target := *provider.upstream
 	target.Path = strings.TrimRight(target.Path, "/") + "/" + strings.TrimLeft(r.URL.Path, "/")
 	target.RawQuery = r.URL.RawQuery
@@ -149,10 +353,6 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	copyHeaders(request.Header, r.Header)
 	request.Header.Del("Host")
-	client := p.client
-	if provider.timeout > 0 {
-		client = &http.Client{Timeout: provider.timeout}
-	}
 	response, err := client.Do(request)
 	if err != nil {
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
@@ -166,6 +366,111 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = io.Copy(w, response.Body)
+}
+
+// serveOpenAIChat translates an Anthropic messages request onto an upstream
+// chat-completions call, then translates the response back. The upstream's own headers
+// are deliberately not copied: the body no longer matches the encoding or length it
+// described.
+func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
+	translated, err := translateAnthropicRequest(body, plan.targetModel)
+	if err != nil {
+		writeTranslatedError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	target := *plan.provider.upstream
+	target.Path = strings.TrimRight(target.Path, "/") + "/chat/completions"
+	// The inbound query belongs to the Anthropic endpoint (?beta=true); it means
+	// nothing here and a strict gateway may reject it.
+	target.RawQuery = ""
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target.String(), bytes.NewReader(translated))
+	if err != nil {
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to create upstream request")
+		return
+	}
+	applyOpenAIChatHeaders(request.Header, r.Header)
+	response, err := client.Do(request)
+	if err != nil {
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "upstream unavailable")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		p.serveTranslatedError(w, response)
+		return
+	}
+	if plan.isStreaming {
+		p.serveTranslatedStream(w, response, plan)
+		return
+	}
+	upstreamBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to read upstream response")
+		return
+	}
+	out, err := translateOpenAIResponse(upstreamBody, plan.requestedModel)
+	if err != nil {
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", err.Error())
+		return
+	}
+	applyTranslatedResponseHeaders(w.Header(), false)
+	w.WriteHeader(response.StatusCode)
+	_, _ = w.Write(out)
+}
+
+// serveTranslatedStream writes the translated SSE body. The status is committed before
+// the first byte, so an error past this point can only be reported in band.
+func (p *proxy) serveTranslatedStream(w http.ResponseWriter, response *http.Response, plan requestPlan) {
+	applyTranslatedResponseHeaders(w.Header(), true)
+	w.WriteHeader(response.StatusCode)
+	flusher, _ := w.(http.Flusher)
+	translator := newStreamTranslator(w, flusher, plan.requestedModel, plan.inputTokens)
+	if err := translator.run(response.Body); err != nil {
+		translator.emitError(err.Error())
+	}
+}
+
+// serveTranslatedError rewraps an upstream error in the Anthropic envelope. Claude Code
+// classifies errors on that shape, so forwarding the OpenAI body verbatim would be
+// misread. Keeping the upstream's message is what makes a wrong dialect mapping legible.
+func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Response) {
+	message := ""
+	if raw, err := io.ReadAll(io.LimitReader(response.Body, 64*1024)); err == nil {
+		var parsed struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &parsed) == nil {
+			message = parsed.Error.Message
+			if message == "" {
+				message = parsed.Message
+			}
+		}
+		if message == "" {
+			message = strings.TrimSpace(string(raw))
+		}
+	}
+	if message == "" {
+		message = http.StatusText(response.StatusCode)
+	}
+	writeTranslatedError(w, response.StatusCode, anthropicErrorTypeForStatus(response.StatusCode), message)
+}
+
+// serveCountTokens answers Anthropic's token count locally. The upstream 404s on this
+// path, and Claude Code asks for a count at startup, so an estimate answers the question
+// the caller actually has.
+func (p *proxy) serveCountTokens(w http.ResponseWriter, body []byte) {
+	count := estimateRequestTokens(body)
+	encoded, err := json.Marshal(map[string]int{"input_tokens": count})
+	if err != nil {
+		writeTranslatedError(w, http.StatusInternalServerError, "api_error", "failed to encode token count")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
 }
 
 func requestModel(body []byte) (string, error) {
@@ -210,11 +515,21 @@ func rewriteModel(body []byte, mappings map[string]string) []byte {
 	if !ok {
 		return body
 	}
+	return rewriteModelTo(body, mapped)
+}
+
+// rewriteModelTo sets the body's model to a resolved target, leaving the body untouched
+// when the target is already what it carries.
+func rewriteModelTo(body []byte, target string) []byte {
+	model, err := requestModel(body)
+	if err != nil || model == target {
+		return body
+	}
 	var payload map[string]any
 	if json.Unmarshal(body, &payload) != nil {
 		return body
 	}
-	payload["model"] = mapped
+	payload["model"] = target
 	result, err := json.Marshal(payload)
 	if err != nil {
 		return body
@@ -404,6 +719,9 @@ func legacyPidPath() string { return path.Join(home(), ".cache", "ccbunshin", "p
 
 // proxyInitTemplate is the starting point written by `ccbunshin proxy init`.
 // Upstreams use reserved example.invalid hosts; replace them with real URLs.
+// provider2 demonstrates a translating provider: a gateway that speaks OpenAI's
+// chat-completions API instead of Anthropic's messages API. Kept in sync with
+// examples/proxy.json by TestProxyInitTemplateMatchesExample.
 const proxyInitTemplate = `{
   "port": 3456,
   "providers": {
@@ -414,7 +732,9 @@ const proxyInitTemplate = `{
       }
     },
     "provider2": {
-      "upstream": "https://free-gateway.example.invalid"
+      "upstream": "https://free-gateway.example.invalid",
+      "dialect": "openai-chat",
+      "default_model": "oss-model"
     }
   },
   "routes": [
@@ -423,7 +743,7 @@ const proxyInitTemplate = `{
       "provider": "provider1"
     },
     {
-      "pattern": "deepseek-v4-flash",
+      "pattern": "deepseek-*",
       "provider": "provider2"
     },
     {

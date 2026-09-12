@@ -57,6 +57,17 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
    which resolves the provider or falls back to the original `claude` binary. Shell code
    never parses profile files and never maintains a Claude option list: `launch` forwards
    arguments unchanged and returns Claude's exit status.
+8. **The proxy's protocol translation is opt-in per provider and never sends
+   `reasoning_effort`.** `dialect` on a provider, route, or `model_dialects` entry selects
+   between `anthropic` (default, byte-for-byte pass-through) and `openai-chat` (Anthropic
+   `/v1/messages` translated onto OpenAI `/chat/completions`). Resolution is
+   most-specific-first, and because a dialect belongs to a model rather than a provider,
+   one gateway serving both kinds is expressed as two routes in different namespaces.
+   `reasoning_effort` is never emitted and `thinking` is never forwarded: deriving the
+   former from Anthropic `thinking` is the bug this replaces, and reasoning is recovered
+   from the upstream response instead. Credentials are forwarded,
+   never stored (reaffirms decision 4). Translation lives in `dialect.go`, `translate.go`,
+   and `stream.go`.
 
 ## Status
 

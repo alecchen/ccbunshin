@@ -8,7 +8,9 @@
       }
     },
     "provider2": {
-      "upstream": "https://free-gateway.example.invalid"
+      "upstream": "https://free-gateway.example.invalid",
+      "dialect": "openai-chat",
+      "default_model": "oss-model"
     }
   },
   "routes": [
@@ -17,7 +19,7 @@
       "provider": "provider1"
     },
     {
-      "pattern": "deepseek-v4-flash",
+      "pattern": "deepseek-*",
       "provider": "provider2"
     },
     {

@@ -1,0 +1,16 @@
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"role":"assistant"},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"reasoning":"The","reasoning_details":[{"type":"reasoning.text","text":"The","format":"unknown","index":0}]},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"reasoning":" user","reasoning_details":[{"type":"reasoning.text","text":" user","format":"unknown","index":0}]},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"reasoning":" asks","reasoning_details":[{"type":"reasoning.text","text":" asks","format":"unknown","index":0}]},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"reasoning":" a","reasoning_details":[{"type":"reasoning.text","text":" a","format":"unknown","index":0}]},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{"content":"4"},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_example"}
+
+data: {"id":"gen_example","object":"chat.completion.chunk","created":1789186537,"model":"oss-model","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":26,"total_tokens":66,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0,"video_tokens":0},"completion_tokens_details":{"reasoning_tokens":24,"image_tokens":0},"cache_creation_input_tokens":0},"system_fingerprint":"fp_example"}
+
+data: [DONE]
+

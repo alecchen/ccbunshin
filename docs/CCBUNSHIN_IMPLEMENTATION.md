@@ -188,7 +188,15 @@ The `proxy/` Go service owns provider routing independently from LeanCTX. It sta
 
 Each Anthropic request must contain a model. Ordered glob routes select the provider: patterns without `*` are exact matches, while patterns such as `claude-*` match prefixes. Provider definitions contain upstream URLs, timeouts, and optional model rewrites. Authentication remains in Claude Code settings and environment through native mechanisms such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper`; the proxy config contains no credentials.
 
-See `examples/proxy.json` and `proxy/README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
+### Protocol translation (`dialect`)
+
+A provider may declare `"dialect": "openai-chat"` when the upstream speaks OpenAI's `/chat/completions` API rather than Anthropic's `/v1/messages`. The proxy then translates one way only, Anthropic to OpenAI-chat, and translates the response back: `system`, content blocks, `tools`, and `tool_choice` on the request; `reasoning` to `thinking` blocks, `tool_calls` to `tool_use`, and `finish_reason` to `stop_reason` on the response. `/v1/messages/count_tokens` is answered locally with a character estimate, and upstream errors are rewrapped in Anthropic's error envelope at the same status.
+
+Dialect resolution is layered, most-specific first: a route's `model_dialects` entry for the target model, then the route's `dialect`, then the provider's `dialect`, then `anthropic`. The default is pass-through, so a config written before dialects existed behaves exactly as it did. Because the dialect is a property of the model rather than the provider, one gateway serving both kinds of model can be expressed with two routes in different namespaces.
+
+The translation deliberately never emits `reasoning_effort`. Deriving it from Anthropic's `thinking` is precisely the failure this replaces: the request is sent without any effort tier, and reasoning is recovered from the response's `reasoning` field instead. The `thinking` parameter itself is not forwarded either.
+
+See `examples/proxy.json` and `cmd/ccbunshin/README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
 
 The requirements doc describes the custom proxy that maps Claude Code requests to the FREE and PAID gateways while keeping LeanCTX responsible only for context optimization.
 
