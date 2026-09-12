@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -577,17 +578,19 @@ const localProfileFile = ".ccbunshin-profile"
 
 func localProfilePath(dir string) string { return path.Join(dir, localProfileFile) }
 
-func readLocalProfile(file string) (string, error) {
+// readProfileName reads a one-line profile marker: the directory-local
+// .ccbunshin-profile file, or the global selection file.
+func readProfileName(file string) (string, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return "", err
 	}
 	name := strings.TrimSpace(string(data))
 	if name == "" || strings.ContainsAny(name, "\r\n") {
-		return "", fmt.Errorf("invalid local profile in %s", file)
+		return "", fmt.Errorf("invalid profile marker in %s", file)
 	}
 	if _, err := profilePath(name); err != nil {
-		return "", fmt.Errorf("invalid local profile in %s: %w", file, err)
+		return "", fmt.Errorf("invalid profile marker in %s: %w", file, err)
 	}
 	return name, nil
 }
@@ -595,7 +598,7 @@ func readLocalProfile(file string) (string, error) {
 func findLocalProfile(dir string) (string, string, error) {
 	for {
 		file := localProfilePath(dir)
-		name, err := readLocalProfile(file)
+		name, err := readProfileName(file)
 		if err == nil {
 			return name, file, nil
 		}
@@ -655,6 +658,71 @@ func localCLI(args []string) error {
 	return setLocalProfile(args[0])
 }
 
+// globalProfileFile holds the fallback profile used outside any project, the
+// analogue of pyenv's global version. It lives beside the profiles so it
+// travels with CCBUNSHIN_PROFILES_DIR.
+func globalProfilePath() string { return path.Join(profilesDir(), "global") }
+
+func setGlobalProfile(name string) error {
+	if _, err := profilePath(name); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(profilesDir(), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(globalProfilePath(), []byte(name+"\n"), 0600)
+}
+
+func unsetGlobalProfile() error {
+	err := os.Remove(globalProfilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func globalCLI(args []string) error {
+	if len(args) == 0 {
+		name, err := readProfileName(globalProfilePath())
+		if err != nil {
+			return usageError("global", "no global profile found")
+		}
+		fmt.Printf("profile: %s\nsource: %s\n", name, globalProfilePath())
+		return nil
+	}
+	if len(args) == 1 && args[0] == "--unset" {
+		return unsetGlobalProfile()
+	}
+	if len(args) != 1 {
+		return usageError("global", "global requires a profile or --unset")
+	}
+	return setGlobalProfile(args[0])
+}
+
+// findGlobalProfile is findLocalProfile's single-level counterpart: the global
+// file is a fixed location, not a marker to walk up to.
+func findGlobalProfile() (string, string, error) {
+	file := globalProfilePath()
+	name, err := readProfileName(file)
+	if err != nil {
+		return "", "", err
+	}
+	return name, file, nil
+}
+
+// findProfile resolves a profile for dir: the nearest .ccbunshin-profile marker
+// wins, then the global selection, mirroring pyenv's local-then-global order.
+func findProfile(dir string) (string, string, error) {
+	name, file, err := findLocalProfile(dir)
+	if err == nil {
+		return name, file, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", "", err
+	}
+	return findGlobalProfile()
+}
+
 func resolveLaunch(args []string) (string, []string, error) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		return args[0], args[1:], nil
@@ -663,17 +731,18 @@ func resolveLaunch(args []string) (string, []string, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	name, _, err := findLocalProfile(dir)
+	name, _, err := findProfile(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("launch requires a profile or local .ccbunshin-profile")
+		return "", nil, fmt.Errorf("launch requires a profile, a local .ccbunshin-profile, or a global profile")
 	}
 	return name, args, nil
 }
 
-// resolveProvider returns the nearest .ccbunshin-profile provider for dir, or
-// "" when dir is not inside a ccbunshin project (no marker, or a malformed one).
+// resolveProvider returns the profile for dir: the nearest .ccbunshin-profile
+// provider, else the global profile, or "" when neither exists (no marker, or
+// a malformed one).
 func resolveProvider(dir string) string {
-	name, _, err := findLocalProfile(dir)
+	name, _, err := findProfile(dir)
 	if err != nil {
 		return ""
 	}
@@ -1141,13 +1210,66 @@ func proxyStop() error {
 // Release binaries carry their release tag; locally built binaries are empty.
 var version = ""
 
+// buildTime is stamped at build time via -ldflags "-X main.buildTime=<stamp>"
+// in the buildTimeLayout that formatLocalVersion appends to the commit SHA.
+var buildTime = ""
+
+const buildTimeLayout = "20060102-1504"
+
+// formatLocalVersion identifies a local build by commit SHA, suffixed with the
+// build time when one was stamped. Either part may be absent.
+func formatLocalVersion(sha, stamp string) string {
+	sha = strings.TrimSpace(sha)
+	stamp = strings.TrimSpace(stamp)
+	switch {
+	case sha == "":
+		return stamp
+	case stamp == "":
+		return sha
+	}
+	return sha + "-" + stamp
+}
+
+// shortCommitLength is how much of the 40-character revision to keep.
+const shortCommitLength = 7
+
+// buildCommit reads the commit SHA the Go toolchain records when building
+// inside a git checkout, shortened to shortCommitLength. -buildvcs=false, a
+// source tarball, or a tree that is not a repository leaves it out.
+func buildCommit() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			revision := setting.Value
+			if len(revision) > shortCommitLength {
+				return revision[:shortCommitLength]
+			}
+			return revision
+		}
+	}
+	return ""
+}
+
+// localVersion describes a binary that has no release tag: its commit SHA and
+// build time, or "" when neither is known.
+func localVersion() string { return formatLocalVersion(buildCommit(), buildTime) }
+
+// printVersion prints the release tag when the binary was built from a tag, and
+// otherwise the local build identifier. version is never a SHA: updateCLI
+// compares it against release tags with compareVersions.
 func printVersion() {
-	current := strings.TrimSpace(version)
-	if current == "" {
-		fmt.Println("unknown (not a release build)")
+	if current := strings.TrimSpace(version); current != "" {
+		fmt.Println(current)
 		return
 	}
-	fmt.Println(current)
+	if local := localVersion(); local != "" {
+		fmt.Println(local)
+		return
+	}
+	fmt.Println("unknown (not a release build)")
 }
 
 func updateRepo() string {
@@ -1305,6 +1427,7 @@ Commands:
                                    create a profile
   launch [<name>] [claude args...] run Claude Code with a profile
   local [<name>|--unset]           show, set, or clear the directory-local profile
+  global [<name>|--unset]          show, set, or clear the global (default) profile
   model <name> <model>             set the default model for a profile
   list                             list profiles
   status <name>                    show a profile path and model
@@ -1345,15 +1468,27 @@ is used. --force overwrites an existing profile.
 
 Run "claude --settings ~/.claude-profiles/<name>.json". Extra arguments are
 forwarded to Claude unchanged and its exit status is returned. With no name,
-use the nearest .ccbunshin-profile marker in this directory or a parent; an
-explicit name takes precedence.
+use the nearest .ccbunshin-profile marker in this directory or a parent, then
+the global profile; an explicit name takes precedence.
 `, true
 	case "local":
 		return `usage: ccbunshin local [<name>|--unset]
 
 With no argument, print the nearest .ccbunshin-profile marker (searching this
 directory upward) and its profile. With a name, write .ccbunshin-profile in
-the current directory. --unset removes it.
+the current directory. --unset removes it. A local selection outranks the
+global one for this directory and its descendants.
+`, true
+	case "global":
+		return `usage: ccbunshin global [<name>|--unset]
+
+With no argument, print the global profile and the file that selects it. With a
+name, write the global selection (~/.claude-profiles/global, or
+$CCBUNSHIN_PROFILES_DIR/global). --unset removes it.
+
+The global profile is the fallback for directories with no .ccbunshin-profile
+marker: local wins where one exists, global applies everywhere else. This
+mirrors "pyenv local" and "pyenv global".
 `, true
 	case "model":
 		return `usage: ccbunshin model <name> <model>
@@ -1476,6 +1611,8 @@ func runCLI(args []string) error {
 		return runClaude(name, claudeArgs)
 	case "local":
 		return localCLI(args[1:])
+	case "global":
+		return globalCLI(args[1:])
 	case "init":
 		if len(args) == 1 {
 			return initCLI()

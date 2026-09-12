@@ -7,8 +7,14 @@ This directory contains the Go executable. It manages profiles, launches Claude 
 From the repository root:
 
 ```sh
-go -C cmd/ccbunshin build -o ccbunshin
+go -C cmd/ccbunshin build -ldflags "-X main.buildTime=$(date +%Y%m%d-%H%M)" -o ccbunshin
 ```
+
+`ccbunshin version` then reports `<short commit>-<build time>`, for example
+`e17b3c5-20260912-1453`. The commit comes from the toolchain's VCS stamping and
+needs no flag, shortened to 7 characters; the time comes from the `-ldflags`
+stamp. Omit the stamp for a commit-only identity. Release builds are stamped
+`-X main.version=<tag>` by the release workflow and report the tag.
 
 Cross-compile for Linux:
 
@@ -28,6 +34,8 @@ env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 ccbunshin init [bash|zsh|tcsh]
 ccbunshin create <name> [--from <file>] [--force]
 ccbunshin launch [<name>] [claude args...]
+ccbunshin local [<name>|--unset]
+ccbunshin global [<name>|--unset]
 ccbunshin model <name> <model>
 ccbunshin list
 ccbunshin status <name>
@@ -72,7 +80,7 @@ eval "$(ccbunshin init zsh)"
 eval `ccbunshin init tcsh`
 ```
 
-Inside a project, `claude` behaves as `ccbunshin launch <provider>`; outside one it runs the original Claude Code command with the original arguments. The wrapper reuses the existing `.ccbunshin-profile` marker and delegates project discovery to the ccbunshin binary, so it never parses profile files itself.
+Inside a project, `claude` behaves as `ccbunshin launch <provider>`; outside one it uses the global profile from `ccbunshin global <name>`, or the original Claude Code command with the original arguments when no global profile is set. The wrapper reuses the existing `.ccbunshin-profile` marker and delegates project discovery to the ccbunshin binary, so it never parses profile files itself.
 
 Bash and zsh install a `claude` shell function that resolves the provider by calling `ccbunshin resolve-provider`. tcsh cannot express conditional aliases, so it installs a `claude` alias that delegates to `ccbunshin run`, the internal command that resolves the nearest project provider or falls back to the original `claude` binary. `ccbunshin resolve-provider` and `ccbunshin run` are internal but callable. Re-running eval is idempotent: no nested wrappers or duplicate aliases.
 
