@@ -312,6 +312,48 @@ func TestResolveLaunchUsesGlobalOutsideProject(t *testing.T) {
 	}
 }
 
+// TestResolveLaunchGlobalNameSelectsGlobal pins the reserved "global" argument:
+// the global selection file is <profiles>/global with no .json suffix, so
+// treating the word as an ordinary profile name would look for global.json and
+// fail even though a global profile is set.
+func TestResolveLaunchGlobalNameSelectsGlobal(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("free"); err != nil {
+		t.Fatal(err)
+	}
+	chdirT(t, t.TempDir())
+	name, claudeArgs, err := resolveLaunch([]string{globalProfileName, "-p", "hi"})
+	if err != nil || name != "free" || !sameArgs(claudeArgs, []string{"-p", "hi"}) {
+		t.Fatalf("resolveLaunch(global) = %q, %q, %v", name, claudeArgs, err)
+	}
+}
+
+// An explicit profile name still beats the global selection, and "global" is
+// the only name reserved for the selector.
+func TestResolveLaunchGlobalNameBeatsLocalMarker(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("free"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	chdirT(t, root)
+	if err := os.WriteFile(localProfilePath(root), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name, _, err := resolveLaunch([]string{globalProfileName})
+	if err != nil || name != "free" {
+		t.Fatalf("resolveLaunch(global) = %q, %v; want the global selection", name, err)
+	}
+}
+
+func TestResolveLaunchGlobalNameWithNoSelectionFails(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	chdirT(t, t.TempDir())
+	if _, _, err := resolveLaunch([]string{globalProfileName}); err == nil {
+		t.Fatal("resolveLaunch(global) accepted an unset global selection")
+	}
+}
+
 func TestResolveLaunchLocalBeatsGlobal(t *testing.T) {
 	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
 	if err := setGlobalProfile("free"); err != nil {

@@ -113,6 +113,32 @@ run_shell() {
   echo "ok: $shell"
 }
 
+# A `claude` alias defined before the eval must not stop the wrapper from
+# installing: zsh parses the whole eval string at once, so an alias named claude
+# turns the POSIX `claude() { ... }` definition into a parse error.
+run_alias_shadow() {
+  shell=$1
+  case "$shell" in
+    bash) flags='--noprofile --norc -c' ;;
+    zsh)  flags='-f -c' ;;
+    *) return 0 ;;
+  esac
+  echo "== $shell (pre-existing claude alias) =="
+  : > "$LOG"
+  code=$(printf 'alias claude="echo SHADOWED"
+eval "$(ccbunshin init %s)"
+cd "$PROJ1"
+claude -p "again"
+' "$shell")
+  "$shell" $flags "$code" || { echo "FAILED: $shell alias-shadow scenario exited $?"; return 1; }
+  printf 'argv: [--settings] [%s] [-p] [again]\n' "$SET1" > "$WORK/expected"
+  if ! diff -u "$WORK/expected" "$LOG"; then
+    echo "FAILED: $shell wrapper did not survive a pre-existing claude alias"
+    return 1
+  fi
+  echo "ok: $shell alias-shadow"
+}
+
 failed=0
 for shell in bash zsh tcsh; do
   if ! command -v "$shell" >/dev/null 2>&1; then
@@ -120,6 +146,7 @@ for shell in bash zsh tcsh; do
     continue
   fi
   run_shell "$shell" || failed=1
+  run_alias_shadow "$shell" || failed=1
 done
 
 [ "$failed" -eq 0 ] || exit 1
