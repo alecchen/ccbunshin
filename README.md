@@ -107,6 +107,7 @@ Set a global profile as the fallback for every directory with no marker:
 ```sh
 ccbunshin global provider1
 ccbunshin launch           # outside any project: uses provider1
+ccbunshin launch global    # same thing, named explicitly
 ccbunshin global           # profile: provider1
 ccbunshin global --unset
 ```
@@ -114,7 +115,9 @@ ccbunshin global --unset
 The global selection lives in `~/.claude-profiles/global` (or
 `$CCBUNSHIN_PROFILES_DIR/global`), so it is one file and no environment
 variable to keep exported. Local wins where a marker exists, global applies
-everywhere else, exactly like `pyenv local` and `pyenv global`.
+everywhere else, exactly like `pyenv local` and `pyenv global`. The name
+`global` is reserved in `ccbunshin launch`: it selects the global profile
+rather than a profile file named `global.json`.
 
 The lookup is performed by the executable, so this works unchanged from Bash, zsh, tcsh, and other shells.
 

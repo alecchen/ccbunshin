@@ -723,9 +723,22 @@ func findProfile(dir string) (string, string, error) {
 	return findGlobalProfile()
 }
 
+// globalProfileName is the reserved first argument that asks for the global
+// selection explicitly. The global file has no .json suffix (it lives at
+// <profiles>/global, not <profiles>/global.json), so without this an explicit
+// "global" would be looked up as an ordinary profile file and never found.
+const globalProfileName = "global"
+
 func resolveLaunch(args []string) (string, []string, error) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		return args[0], args[1:], nil
+		if args[0] != globalProfileName {
+			return args[0], args[1:], nil
+		}
+		name, _, err := findGlobalProfile()
+		if err != nil {
+			return "", nil, fmt.Errorf("no global profile set; run ccbunshin global <name>")
+		}
+		return name, args[1:], nil
 	}
 	dir, err := os.Getwd()
 	if err != nil {
@@ -905,8 +918,17 @@ func listProfiles() error {
 // claudeInit is the claude wrapper shared by bash and zsh. It resolves the
 // nearest project provider lazily at call time, so cd/pushd/popd work without
 // any directory-change hooks. Redefining the function makes re-eval idempotent.
+//
+// The wrapper must be defined with the `function` keyword, after clearing any
+// existing alias. zsh parses an entire eval string before running any of it, so
+// a `claude` alias already defined in the rc file (agent launchers commonly set
+// one) turns the POSIX `claude() { ... }` form into a parse error and the
+// wrapper silently never installs. The keyword form parses; the unalias then
+// removes the alias so `claude` resolves to the function rather than to the
+// alias, which would otherwise still win at call time.
 const claudeInit = `# ccbunshin: route claude through the nearest .ccbunshin-profile project
-claude() {
+unalias claude 2>/dev/null || true
+function claude {
     local provider
     provider="$(ccbunshin resolve-provider 2>/dev/null)"
     if [ -n "$provider" ]; then
@@ -1469,7 +1491,9 @@ is used. --force overwrites an existing profile.
 Run "claude --settings ~/.claude-profiles/<name>.json". Extra arguments are
 forwarded to Claude unchanged and its exit status is returned. With no name,
 use the nearest .ccbunshin-profile marker in this directory or a parent, then
-the global profile; an explicit name takes precedence.
+the global profile; an explicit name takes precedence. The name "global" is
+reserved: it selects the global profile rather than a profile file named
+global.json.
 `, true
 	case "local":
 		return `usage: ccbunshin local [<name>|--unset]
