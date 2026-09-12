@@ -126,15 +126,16 @@ The proxy listens on the configured port, reads the request model, applies the o
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
-- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), and `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream).
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none (see below). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream), and `effort` (overriding the provider's).
 
 ## Translating providers
 
 A provider that speaks OpenAI's `/chat/completions` rather than Anthropic's `/v1/messages` needs `"dialect": "openai-chat"`. The proxy then translates in both directions:
 
 - Anthropic `system`, content blocks, `tools`, and `tool_choice` become their chat-completions equivalents. `tool_result` becomes a `role: "tool"` message placed before the turn it answers, and `tool_use` arguments become a JSON string.
-- Upstream `reasoning` becomes Anthropic `thinking` blocks, streaming and non-streaming. **`reasoning_effort` is never sent**: deriving it from `thinking` is what broke requests against the upstream this was built for, so reasoning is recovered from the response instead. `thinking` itself is not forwarded either.
+- Upstream `reasoning` becomes Anthropic `thinking` blocks, streaming and non-streaming. **`reasoning_effort` is never derived from `thinking`**: doing so is what broke requests against the upstream this was built for, so reasoning is recovered from the response instead. `thinking` itself is not forwarded either. An effort the caller states is a different matter and is forwarded - see `effort` under Request translation.
+- The caller's `output_config.effort` becomes `reasoning_effort`. Everything else `output_config` carries is still dropped, `format` among it, so a caller asking for a JSON schema does not get one upstream.
 - `POST /v1/messages/count_tokens` is answered locally with a character-based estimate, since such upstreams often do not implement it. The estimate is approximate by design.
 - Upstream errors are rewrapped in Anthropic's `{"type": "error", ...}` envelope at the same status, keeping the upstream's message, so a client that classifies errors on that shape still works and a wrong mapping is legible.
 - Prompt-cache breakpoints (`cache_control`) are dropped, since chat-completions has no equivalent. Prefix caching still happens: such upstreams cache a repeated prefix automatically, without a marker. Its hit count comes back as `prompt_tokens_details.cached_tokens` and is reported as Anthropic's `cache_read_input_tokens`, with the hit count subtracted out of `input_tokens` so the two still sum to the upstream's `prompt_tokens`. `cache_creation_input_tokens` has no upstream counterpart and stays `0`, so a first turn with a cold prefix reads as `0%`. `input_tokens` is the local estimate until the upstream reports usage, which supersedes it in the `message_delta` - so that field can change between the start of a stream and its end.
@@ -145,6 +146,23 @@ Two things to know when configuring it:
 
 - A route with dialect `openai-chat` needs somewhere to get an acceptable model ID, or `proxy start` refuses the config. Set `default_model` on the provider, or `models` on the provider or route.
 - A misspelled dialect key is ignored rather than rejected, so the provider silently stays on the default. The config format intentionally allows unknown keys; check the spelling if a provider seems untranslated.
+
+### Effort
+
+`effort` sets the `reasoning_effort` for requests that state none, and takes `low`, `medium`, `high`, `xhigh`, or `max`; any other value is rejected at startup. It is a **default, not an override**: a value the caller stated always wins.
+
+The asymmetry is deliberate. Claude Code sends an effort on every effort-capable request, and `/effort` is session-level and re-sent each turn, so a configured value that displaced it would silently turn that control into a no-op. The traffic that states nothing is the tier with no effort of its own - a Haiku-class request carries `output_config.format` and no effort at all - which is exactly the traffic a default is worth setting for.
+
+Route patterns match the whole model string, so give a tier its own route ahead of the catch-all:
+
+```json
+"routes": [
+  {"pattern": "claude-haiku-4-5*", "provider": "gateway", "effort": "low"},
+  {"pattern": "claude-*", "provider": "gateway"}
+]
+```
+
+A route's `effort` overrides the provider's, and an empty value means no default at all.
 
 To find out which endpoint a gateway expects for a given model, POST a one-token request to its `/messages` path and read which endpoint the error names. Model lists often do not say, and an ID's prefix is not a reliable signal.
 

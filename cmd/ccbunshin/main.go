@@ -34,6 +34,7 @@ type provider struct {
 	Models       map[string]string `json:"models,omitempty"`
 	Dialect      string            `json:"dialect,omitempty"`
 	DefaultModel string            `json:"default_model,omitempty"`
+	Effort       string            `json:"effort,omitempty"`
 }
 type route struct {
 	Pattern       string            `json:"pattern"`
@@ -41,6 +42,7 @@ type route struct {
 	Models        map[string]string `json:"models,omitempty"`
 	Dialect       string            `json:"dialect,omitempty"`
 	ModelDialects map[string]string `json:"model_dialects,omitempty"`
+	Effort        string            `json:"effort,omitempty"`
 }
 type loadedConfig struct {
 	port      int
@@ -54,6 +56,7 @@ type loadedRoute struct {
 	dialect       dialect
 	configured    bool // whether dialect came from the config rather than the default
 	modelDialects map[string]dialect
+	effort        string
 }
 type loadedProvider struct {
 	upstream     *url.URL
@@ -62,6 +65,7 @@ type loadedProvider struct {
 	dialect      dialect
 	defaultModel string
 	configured   bool // whether dialect came from the config rather than the default
+	effort       string
 }
 type proxy struct {
 	config loadedConfig
@@ -103,6 +107,10 @@ func loadConfig(filename string) (loadedConfig, error) {
 		if err != nil {
 			return loadedConfig{}, err
 		}
+		effort, err := parseEffort(fmt.Sprintf("provider %q", name), value.Effort)
+		if err != nil {
+			return loadedConfig{}, err
+		}
 		providers[name] = loadedProvider{
 			upstream:     upstream,
 			timeout:      timeout,
@@ -112,6 +120,7 @@ func loadConfig(filename string) (loadedConfig, error) {
 			// Carried unset so the route layer can tell "not configured" from an
 			// explicit anthropic, which validateDialectTargets needs to reason about.
 			configured: value.Dialect != "",
+			effort:     effort,
 		}
 	}
 	seen := map[string]bool{}
@@ -145,6 +154,10 @@ func loadConfig(filename string) (loadedConfig, error) {
 			}
 			modelDialects[model] = md
 		}
+		effort, err := parseEffort(where, item.Effort)
+		if err != nil {
+			return loadedConfig{}, err
+		}
 		routes = append(routes, loadedRoute{
 			pattern:       item.Pattern,
 			provider:      item.Provider,
@@ -152,6 +165,7 @@ func loadConfig(filename string) (loadedConfig, error) {
 			dialect:       d,
 			configured:    item.Dialect != "",
 			modelDialects: modelDialects,
+			effort:        effort,
 		})
 	}
 	cfg := loadedConfig{port: raw.Port, providers: providers, routes: routes}
@@ -374,7 +388,7 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 // are deliberately not copied: the body no longer matches the encoding or length it
 // described.
 func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
-	translated, err := translateAnthropicRequest(body, plan.targetModel)
+	translated, err := translateAnthropicRequest(body, plan.targetModel, plan.effortDefault)
 	if err != nil {
 		writeTranslatedError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return

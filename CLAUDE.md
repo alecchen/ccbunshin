@@ -83,17 +83,24 @@ build from that directory.
    nothing - so the global is a fallback and never overrides a project. Shell code
    never parses profile files and never maintains a Claude option list: `launch` forwards
    arguments unchanged and returns Claude's exit status.
-8. **The proxy's protocol translation is opt-in per provider and never sends
-   `reasoning_effort`.** `dialect` on a provider, route, or `model_dialects` entry selects
+8. **The proxy's protocol translation is opt-in per provider and never derives
+   `reasoning_effort` from `thinking`.** `dialect` on a provider, route, or `model_dialects` entry selects
    between `anthropic` (default, byte-for-byte pass-through) and `openai-chat` (Anthropic
    `/v1/messages` translated onto OpenAI `/chat/completions`). Resolution is
    most-specific-first, and because a dialect belongs to a model rather than a provider,
    one gateway serving both kinds is expressed as two routes in different namespaces.
-   `reasoning_effort` is never emitted and `thinking` is never forwarded: deriving the
-   former from Anthropic `thinking` is the bug this replaces, and reasoning is recovered
-   from the upstream response instead. Credentials are forwarded,
-   never stored (reaffirms decision 4). Translation lives in `dialect.go`, `translate.go`,
-   and `stream.go`.
+   **Deriving** `reasoning_effort` from Anthropic `thinking` is the bug this replaces, so
+   `thinking` is never forwarded and reasoning is recovered from the upstream response
+   instead. A caller-**stated** effort is a different thing and is forwarded: Claude Code
+   sends `output_config.effort` on every effort-capable request, and dropping it made
+   `/effort`, `--effort`, and `effortLevel` silently do nothing (verified 2026-09-12 with a
+   stub upstream: `--model sonnet --effort max` sends `{"effort":"max"}`). The config's
+   `effort` key is a **default for requests that state none, never an override** - Claude
+   Code re-sends the session's value each turn, so an override would make `/effort` a no-op,
+   while the traffic that states nothing (Haiku-class requests, which carry
+   `output_config.format` and no effort) is exactly what a default can reach. Credentials
+   are forwarded, never stored (reaffirms decision 4). Translation lives in `dialect.go`,
+   `translate.go`, and `stream.go`.
 9. **Usage accounting follows Anthropic's split, not the upstream's.** An OpenAI-chat upstream
    reports an inclusive `prompt_tokens` plus `prompt_tokens_details.cached_tokens`;
    `anthropicUsageFromUpstream` reports `cache_read_input_tokens` as the hit count and

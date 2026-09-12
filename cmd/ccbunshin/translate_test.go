@@ -317,19 +317,22 @@ func writeConfig(t *testing.T, body string) string {
 
 // --- request translation ---
 
-func TestTranslateRequestNeverEmitsReasoningEffort(t *testing.T) {
+// The rule this guards is that effort is never DERIVED: the upstream's vocabulary is not
+// Anthropic's, and litellm's mistake was translating thinking into reasoning_effort. A
+// value the caller stated is forwarded; thinking still yields nothing.
+func TestTranslateRequestEffortComesOnlyFromTheCaller(t *testing.T) {
 	body := `{
 	  "model": "claude-opus-5",
 	  "max_tokens": 4096,
 	  "thinking": {"type": "enabled", "budget_tokens": 2048},
-	  "output_config": {"effort": "high"},
 	  "messages": [{"role": "user", "content": "hi"}]
 	}`
-	out, err := translateAnthropicRequest([]byte(body), "oss-model")
+	// thinking alone states no effort, so with no configured default nothing is emitted:
+	// derivation is what this guards, not a configured fallback.
+	out, err := translateAnthropicRequest([]byte(body), "oss-model", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// reasoning_effort is what the upstream rejects and what litellm got wrong.
 	for _, forbidden := range []string{"reasoning_effort", `"thinking"`, `"effort"`, "output_config"} {
 		if strings.Contains(string(out), forbidden) {
 			t.Errorf("translated body leaked %s: %s", forbidden, out)
@@ -337,14 +340,53 @@ func TestTranslateRequestNeverEmitsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestForwardsCallerEffort(t *testing.T) {
+	body := `{
+	  "model": "claude-opus-5",
+	  "max_tokens": 4096,
+	  "output_config": {"effort": "high"},
+	  "messages": [{"role": "user", "content": "hi"}]
+	}`
+	// A configured default must not displace what the caller stated: /effort would
+	// otherwise be a no-op wherever a route sets one.
+	out, err := translateAnthropicRequest([]byte(body), "oss-model", "low")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"reasoning_effort":"high"`) {
+		t.Errorf("caller effort was not forwarded: %s", out)
+	}
+}
+
+func TestTranslateRequestEffortDefaultFillsSilence(t *testing.T) {
+	// The haiku shape: output_config present but carrying only format, so no effort.
+	body := `{
+	  "model": "claude-haiku-4-5",
+	  "max_tokens": 4096,
+	  "output_config": {"format": {"type": "json_schema"}},
+	  "messages": [{"role": "user", "content": "hi"}]
+	}`
+	out, err := translateAnthropicRequest([]byte(body), "oss-model", "low")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"reasoning_effort":"low"`) {
+		t.Errorf("configured default was not applied: %s", out)
+	}
+	// output_config itself still must not reach the upstream.
+	if strings.Contains(string(out), "output_config") {
+		t.Errorf("translated body leaked output_config: %s", out)
+	}
+}
+
 func TestTranslateRequestSystemForms(t *testing.T) {
 	asString, err := translateAnthropicRequest([]byte(
-		`{"model":"m","system":"be terse","messages":[{"role":"user","content":"hi"}]}`), "oss")
+		`{"model":"m","system":"be terse","messages":[{"role":"user","content":"hi"}]}`), "oss", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	asBlocks, err := translateAnthropicRequest([]byte(
-		`{"model":"m","system":[{"type":"text","text":"be terse"}],"messages":[{"role":"user","content":"hi"}]}`), "oss")
+		`{"model":"m","system":[{"type":"text","text":"be terse"}],"messages":[{"role":"user","content":"hi"}]}`), "oss", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +406,7 @@ func TestTranslateRequestToolUseAndToolResult(t *testing.T) {
 	  {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},
 	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt"}]}
 	]}`
-	out, err := translateAnthropicRequest([]byte(body), "oss")
+	out, err := translateAnthropicRequest([]byte(body), "oss", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +442,7 @@ func TestTranslateRequestToolResultsPrecedeUserText(t *testing.T) {
 	body := `{"model":"m","messages":[
 	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"out"},{"type":"text","text":"carry on"}]}
 	]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	var decoded struct {
 		Messages []struct {
 			Role string `json:"role"`
@@ -421,7 +463,7 @@ func TestTranslateRequestDropsEchoedThinkingBlocks(t *testing.T) {
 	    {"type":"redacted_thinking","data":"x"},
 	    {"type":"text","text":"real"}]}
 	]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	if strings.Contains(string(out), "fabricated") || strings.Contains(string(out), "redacted") {
 		t.Fatalf("thinking blocks were forwarded: %s", out)
 	}
@@ -432,7 +474,7 @@ func TestTranslateRequestToolsAndToolChoice(t *testing.T) {
 	  "tools":[{"name":"Bash","description":"run","input_schema":{"type":"object"}},
 	           {"type":"web_search_20260209"}],
 	  "messages":[{"role":"user","content":"hi"}]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	var decoded struct {
 		Tools      []map[string]any `json:"tools"`
 		ToolChoice any              `json:"tool_choice"`
@@ -451,7 +493,7 @@ func TestTranslateRequestToolsAndToolChoice(t *testing.T) {
 func TestTranslateRequestDropsUnsupportedFields(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"top_k":40,"metadata":{"user_id":"u"},
 	  "mcp_servers":[{"url":"x"}],"temperature":0.5,"messages":[{"role":"user","content":"hi"}]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	text := string(out)
 	for _, field := range []string{"top_k", "metadata", "mcp_servers", "user_id"} {
 		if strings.Contains(text, field) {
@@ -468,7 +510,7 @@ func TestTranslateRequestImageBecomesDataURL(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":[
 	  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}},
 	  {"type":"text","text":"what is this"}]}]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	if !strings.Contains(string(out), "data:image/png;base64,QUJD") {
 		t.Fatalf("image was not converted: %s", out)
 	}
@@ -477,7 +519,7 @@ func TestTranslateRequestImageBecomesDataURL(t *testing.T) {
 func TestTranslateRequestMergesAdjacentSameRoleMessages(t *testing.T) {
 	body := `{"model":"m","messages":[
 	  {"role":"user","content":"one"},{"role":"user","content":"two"}]}`
-	out, _ := translateAnthropicRequest([]byte(body), "oss")
+	out, _ := translateAnthropicRequest([]byte(body), "oss", "")
 	var decoded struct {
 		Messages []map[string]any `json:"messages"`
 	}
@@ -494,7 +536,7 @@ func TestTranslateRequestMergesAdjacentSameRoleMessages(t *testing.T) {
 func TestTranslateRequestIgnoresUnknownFields(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],
 	  "some_future_field":{"nested":true},"context_management":{"edits":[]}}`
-	if _, err := translateAnthropicRequest([]byte(body), "oss"); err != nil {
+	if _, err := translateAnthropicRequest([]byte(body), "oss", ""); err != nil {
 		t.Fatalf("an unknown field broke the translation: %v", err)
 	}
 }

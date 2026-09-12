@@ -208,15 +208,32 @@ A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` m
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back. Those are the only two values. A bad value is rejected at startup, so `proxy start` fails and names the key rather than forwarding requests the wrong way.
-- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), and `model_dialects` (a `{target model: dialect}` map overriding both).
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none - see below. Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back. Those are the only two values. A bad value is rejected at startup, so `proxy start` fails and names the key rather than forwarding requests the wrong way.
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both), and `effort` (overriding the provider's).
 
 `dialect` says which wire format a route's upstream speaks, and there are two:
 
 - `"anthropic"` - the default, and what you get with no `dialect` key at all. The request goes upstream byte-for-byte, so nothing is translated and nothing can be lost in translation. Use it for anything that already accepts `/v1/messages`, including a real Anthropic endpoint, a gateway in front of one, or another Anthropic-shaped proxy.
-- `"openai-chat"` - for a gateway that speaks OpenAI's `/chat/completions` instead. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; reports upstream prompt-cache hits as `cache_read_input_tokens` with the hit count subtracted out of `input_tokens`; and rewraps upstream errors in Anthropic's error envelope. It never sends `reasoning_effort`, which several such gateways reject.
+- `"openai-chat"` - for a gateway that speaks OpenAI's `/chat/completions` instead. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; reports upstream prompt-cache hits as `cache_read_input_tokens` with the hit count subtracted out of `input_tokens`; and rewraps upstream errors in Anthropic's error envelope. `reasoning_effort` is never derived from `thinking` - that translation is what several such gateways reject - but a caller that states an effort of its own gets it forwarded. See `effort` below.
 
 Any other value is an error, not a silent fallback: `proxy start` refuses the config and names the offending key. Set `dialect` on a provider, on a route (overriding the provider), or per target model in a route's `model_dialects`. See `cmd/ccbunshin/README.md` for the full behavior and the resolution order.
+
+### Effort (`effort`)
+
+`effort` sets the `reasoning_effort` sent to an `openai-chat` upstream when the request itself carries no effort. Its values are `low`, `medium`, `high`, `xhigh`, and `max`; anything else is rejected at startup.
+
+It is a default, never an override. A value the caller stated always wins, because Claude Code sends an effort on every effort-capable request and re-sends the session's setting on each turn - so a configured value that displaced it would silently turn the `/effort` control into a no-op. What `effort` reaches is the traffic that states nothing, which is the tier that has no effort of its own: a Haiku-class request carries `output_config.format` and no effort at all, and it is what a subagent run on that tier inherits.
+
+Set it on a provider, or on a route to override the provider's. A route pattern matches the whole model string, so give the tier its own route ahead of the catch-all:
+
+```json
+"routes": [
+  {"pattern": "claude-haiku-4-5*", "provider": "gateway", "effort": "low"},
+  {"pattern": "claude-*", "provider": "gateway"}
+]
+```
+
+An `anthropic`-dialect provider is unaffected: nothing is translated, so the caller's own `output_config` goes upstream untouched and `effort` is not consulted.
 
 See `examples/proxy.json` for the full example the `init` template is based on.
 

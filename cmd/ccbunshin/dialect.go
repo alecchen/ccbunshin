@@ -34,6 +34,17 @@ func parseDialect(where, value string) (dialect, error) {
 	return "", fmt.Errorf("%s dialect must be %q or %q", where, dialectAnthropic, dialectOpenAIChat)
 }
 
+// parseEffort reads an optional reasoning_effort default. Unlike dialect, an unset value
+// stays empty rather than normalizing to a default: "" is what marks "the caller decides",
+// and the request path needs to tell that apart from a configured value.
+func parseEffort(where, value string) (string, error) {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return value, nil
+	}
+	return "", fmt.Errorf("%s effort must be one of \"low\", \"medium\", \"high\", \"xhigh\", \"max\"", where)
+}
+
 // requestPlan is the outcome of resolving a request model: which model goes upstream,
 // in which shape, and through which provider.
 type requestPlan struct {
@@ -42,7 +53,8 @@ type requestPlan struct {
 	dialect        dialect
 	provider       loadedProvider
 	isStreaming    bool
-	inputTokens    int // local estimate, surfaced before the upstream reports usage
+	inputTokens    int    // local estimate, surfaced before the upstream reports usage
+	effortDefault  string // reasoning_effort applied when the caller sent none; "" for none
 }
 
 // planFor resolves a request model against the ordered routes, then decides the target
@@ -88,11 +100,21 @@ func (c loadedConfig) planFor(model string) (requestPlan, bool) {
 		if d == "" {
 			d = dialectAnthropic
 		}
+		// Effort is a default, never an override. Claude Code states an effort on every
+		// effort-capable request (/effort is session-level and re-sent each turn), so a
+		// value configured here cannot displace a choice the user made - the caller's
+		// value always wins in translateAnthropicRequest. What this reaches is the tiers
+		// that state nothing, which is why it is worth configuring at all.
+		effort := p.effort
+		if item.effort != "" {
+			effort = item.effort
+		}
 		return requestPlan{
 			requestedModel: model,
 			targetModel:    target,
 			dialect:        d,
 			provider:       p,
+			effortDefault:  effort,
 		}, true
 	}
 	return requestPlan{}, false

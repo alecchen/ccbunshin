@@ -23,10 +23,17 @@ type anthropicRequest struct {
 	StopSequences []string         `json:"stop_sequences"`
 	Tools         []map[string]any `json:"tools"`
 	ToolChoice    json.RawMessage  `json:"tool_choice"`
+	// Effort is read rather than ignored: the caller states it per request, and an
+	// openai-chat upstream wants the same knob under another name. Everything else
+	// output_config carries is still dropped, and the remaining absent fields are
+	// listed below.
+	OutputConfig *struct {
+		Effort string `json:"effort"`
+	} `json:"output_config"`
 	// Deliberately absent, so a field missing from this struct cannot reach the
-	// upstream no matter what the caller sends: thinking, output_config,
-	// reasoning_effort, top_k, metadata, betas, mcp_servers, container,
-	// service_tier, context_management, diagnostics.
+	// upstream no matter what the caller sends: thinking, reasoning_effort, top_k,
+	// metadata, betas, mcp_servers, container, service_tier, context_management,
+	// diagnostics.
 }
 
 type openAIToolCall struct {
@@ -55,6 +62,10 @@ type openAIChatRequest struct {
 	Stop        []string        `json:"stop,omitempty"`
 	Tools       []any           `json:"tools,omitempty"`
 	ToolChoice  any             `json:"tool_choice,omitempty"`
+	// Never derived from thinking or output_config.effort by the translator itself; it
+	// is set from the caller's own effort, or from the route's configured default when
+	// the caller stated none.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // anthropicSystemText flattens either accepted system form to text.
@@ -303,7 +314,8 @@ func mergeSameRole(messages []openAIMessage) []openAIMessage {
 
 // translateAnthropicRequest builds an OpenAI chat-completions body from an Anthropic
 // messages body. It constructs a fresh request rather than mutating the inbound one.
-func translateAnthropicRequest(body []byte, targetModel string) ([]byte, error) {
+// effortDefault applies only when the caller stated no effort of its own.
+func translateAnthropicRequest(body []byte, targetModel, effortDefault string) ([]byte, error) {
 	var request anthropicRequest
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, fmt.Errorf("request body must be valid JSON: %w", err)
@@ -325,8 +337,24 @@ func translateAnthropicRequest(body []byte, targetModel string) ([]byte, error) 
 		Stop:        request.StopSequences,
 		Tools:       translateTools(request.Tools),
 		ToolChoice:  translateToolChoice(request.ToolChoice),
+		// The caller's value wins outright. effortDefault only fills the silence, which
+		// is the one case a configured value can reach: haiku-class requests carry no
+		// effort at all, and a config rule that displaced a stated value would make
+		// /effort a no-op.
+		ReasoningEffort: requestEffort(request.OutputConfig, effortDefault),
 	}
 	return json.Marshal(out)
+}
+
+// requestEffort picks the effort that goes upstream: what the caller stated, else the
+// configured default. A caller-stated value is never replaced.
+func requestEffort(config *struct {
+	Effort string `json:"effort"`
+}, effortDefault string) string {
+	if config != nil && config.Effort != "" {
+		return config.Effort
+	}
+	return effortDefault
 }
 
 // --- response direction ---
