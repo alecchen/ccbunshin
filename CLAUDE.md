@@ -70,6 +70,17 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
    from the upstream response instead. Credentials are forwarded,
    never stored (reaffirms decision 4). Translation lives in `dialect.go`, `translate.go`,
    and `stream.go`.
+9. **Usage accounting follows Anthropic's split, not the upstream's.** An OpenAI-chat upstream
+   reports an inclusive `prompt_tokens` plus `prompt_tokens_details.cached_tokens`;
+   `anthropicUsageFromUpstream` reports `cache_read_input_tokens` as the hit count and
+   `input_tokens` as `prompt_tokens - cached`, clamped at zero, because Anthropic counts cache
+   reads separately. The sum of the three input fields is therefore the upstream's
+   `prompt_tokens`, which is what a client's context denominator depends on. Do not "simplify"
+   this back to passing `prompt_tokens` through as `input_tokens`: the same prefix would then be
+   counted twice and every cache percentage would read 0 again. `cache_creation_input_tokens`
+   has no upstream counterpart and is always `0`. Reported usage supersedes
+   `estimateRequestTokens` for `input_tokens`, not just `output_tokens`, in the trailing
+   `message_delta`.
 
 ## Status
 

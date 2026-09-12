@@ -71,6 +71,7 @@ ccbunshin list
 ccbunshin status <name>
 ccbunshin doctor <name>
 ccbunshin delete <name>
+ccbunshin uninstall
 ccbunshin proxy init [--force]
 ccbunshin proxy start
 ccbunshin proxy status
@@ -98,6 +99,7 @@ ccbunshin launch
 
 This writes a `.ccbunshin-profile` marker in the current directory. `ccbunshin launch` searches the current directory and its parents, with the nearest marker taking precedence. An explicit profile takes precedence over the local file. This project-local selection model is inspired by [rbenv](https://github.com/rbenv/rbenv)/[pyenv](https://github.com/pyenv/pyenv)'s local version model. Inspect or clear the current local selection with:
 
+```sh
 ccbunshin local
 ccbunshin local --unset
 ```
@@ -138,7 +140,9 @@ ccbunshin model provider1 claude-sonnet-4-5
 `ccbunshin init` (no args) detects `~/.bashrc`, `~/.zshrc`, `~/.tcshrc`/`~/.cshrc`
 and appends the matching wrapper hook to each file that exists, printing
 per-file status (`installed:` / `ok: already hooks` / `skip: not found`) to
-stdout. It is idempotent: re-running never duplicates a hook.
+stdout. It is idempotent: re-running never duplicates a hook. `ccbunshin uninstall`
+removes those hooks again, matching the exact line `init` wrote so a hook you edited
+by hand is left alone; your profiles are not touched.
 
 Alternatively, add a wrapper to one shell manually:
 
@@ -209,7 +213,7 @@ A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` m
 
 ### Translating providers
 
-A gateway that speaks OpenAI's `/chat/completions` instead of Anthropic's `/v1/messages` needs `"dialect": "openai-chat"`. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; and rewraps upstream errors in Anthropic's error envelope. It never sends `reasoning_effort`, which several such gateways reject. See `cmd/ccbunshin/README.md` for the full behavior and the resolution order.
+A gateway that speaks OpenAI's `/chat/completions` instead of Anthropic's `/v1/messages` needs `"dialect": "openai-chat"`. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; reports upstream prompt-cache hits as `cache_read_input_tokens` with the hit count subtracted out of `input_tokens`; and rewraps upstream errors in Anthropic's error envelope. It never sends `reasoning_effort`, which several such gateways reject. See `cmd/ccbunshin/README.md` for the full behavior and the resolution order.
 
 See `examples/proxy.json` for the full example the `init` template is based on.
 
