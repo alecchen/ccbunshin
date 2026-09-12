@@ -9,16 +9,15 @@
 > (endpoint, model, hooks, OTEL). Deploy several at once; when a clone disperses, its
 > knowledge returns to the original.
 >
-> Status: draft spec v3 (2026-09-06). v2 chose per-profile `--settings` files over the v1
-> `CLAUDE_CONFIG_DIR` + symlinks design; v3 adds the design-review decisions (no auth
-> handling, per-variable env merging, `model` command, trimmed `doctor`). Mechanism research:
-> `INVESTIGATION_FREE_PAID.md`. Requirements:
+> Status: the spec is implemented; `docs/DECISIONS.md` supersedes it wherever the two disagree
+> on a settled decision. v2 chose per-profile `--settings` files over the v1 `CLAUDE_CONFIG_DIR`
+> + symlinks design; v3 added the design-review decisions (no auth handling, per-variable env
+> merging, `model` command, trimmed `doctor`). Prior art: `docs/PRIOR_ART.md`. Requirements:
 > `Claude Code Multi-Endpoint - Shared State Architecture Requirements.md`.
 >
 > Repo scope, two phases:
 > 1. **Config isolation** (this doc) - per-process FREE/PAID configuration via `--settings`.
-> 2. **Multi-endpoint proxy** (phase 2, separate component) - gateway/model routing. Design
->    deferred; open questions in section 10.
+> 2. **Multi-endpoint proxy** (phase 2) - gateway/model routing, implemented (section 10).
 
 ---
 
@@ -209,12 +208,15 @@ The requirements doc describes the custom proxy that maps Claude Code requests t
 
 - **No `CLAUDE_CONFIG_DIR` / symlink management** (v1 design, superseded).
 - **No auth handling** (native Claude Code mechanisms, section 6).
-- **No proxy in phase 1.** No LeanCTX integration (separate concern). No GUI. No binary
-  version management.
+- No LeanCTX integration (separate concern). No GUI.
+
+Phase 1's "no proxy, no binary version management" no longer holds: both are implemented and are
+listed in decision 5.
 
 ## 12. Related work
 
-- `luckybilly/cc-switch-helper` (`ccs`) - the same `--settings` mechanism; depends on
-  cc-switch.
-- `edimuj/claude-rig` - the `CLAUDE_CONFIG_DIR` design reference (v1), dormant.
-- `claude-code-provider-gateway` (CCPG) - the proxy design reference for phase 2.
+The tools that solve this problem in two families, and why none was adopted, are surveyed in
+`docs/PRIOR_ART.md`. The two closest designs are `luckybilly/cc-switch-helper` (`ccs`, the same
+`--settings` mechanism, but dependent on cc-switch) and `edimuj/claude-rig` (the
+`CLAUDE_CONFIG_DIR` design reference, dormant). `claude-code-provider-gateway` (CCPG) was the
+proxy design reference for phase 2.

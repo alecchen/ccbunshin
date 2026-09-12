@@ -30,13 +30,11 @@ build from that directory.
   from an earlier working title). v2 chose per-profile `--settings` files over the earlier
   `CLAUDE_CONFIG_DIR` + symlinks design; later sections cover the project-aware `claude`
   wrapper and the implemented model-routed proxy. Read before changing CLI behavior.
+- `docs/PRIOR_ART.md` - the tools that already solve this problem, in two families, and why none
+  was adopted. Historical survey, kept for "why not an existing tool" and for the two closest
+  designs; its mechanisms are consolidated into `docs/DECISIONS.md`.
 - `docs/Claude Code Multi-Endpoint - Shared State Architecture Requirements.md` - the
   problem statement and hard requirements. Source of truth for WHAT must be solved.
-- `docs/INVESTIGATION_FREE_PAID.md` - research: CCPG evaluation, GitHub alternatives,
-  claude-rig deep-dive. Historical context; its verdicts are superseded by the
-  implementation spec and the code.
-- `docs/CC_SWITCH_BASE_URL_PIN.md` - tangential note on pinning `ANTHROPIC_BASE_URL` against
-  cc-switch rewrites via `--settings`.
 - `docs/PLAN_OPENAI_CHAT_DIALECT.md` - the openai-chat dialect in full: config surface,
   translation rules, and its risk register. Supersedes section 10 of the implementation notes
   for anything dialect-related.

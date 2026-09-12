@@ -1,6 +1,8 @@
 # Plan: Anthropic to OpenAI-chat translation layer (`dialect`)
 
-Status: proposal, not implemented.
+Status: implemented. Kept as the design record: it is the full statement of the translation rules,
+the risk register, and why `reasoning_effort` is never derived from `thinking`. Where it disagrees
+with the code, the code and `docs/DECISIONS.md` decision 8 win.
 
 ## 1. Context
 

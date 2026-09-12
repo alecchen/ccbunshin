@@ -1,6 +1,8 @@
 # Plan: pass prompt-cache usage through to the client
 
-Status: proposal, reviewed; implementation in progress.
+Status: implemented. Kept as the design record: section 2 holds the verified upstream facts the
+usage split rests on, which `docs/DECISIONS.md` decision 9 summarizes but does not reproduce. Where
+it disagrees with the code, the code and decision 9 win.
 
 ## 1. Context
 

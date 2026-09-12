@@ -213,6 +213,16 @@ The key requirement is:
 
 # 6. `CLAUDE_CONFIG_DIR`
 
+**Resolved: rejected.** The investigation this section asks for was carried out; ccbunshin uses
+per-profile `--settings` files instead, and `CLAUDE_CONFIG_DIR` is not used anywhere. See decision 1
+in `docs/DECISIONS.md` for the mechanism and the reason.
+
+The section is kept as the record of the requirement it stated, which the chosen mechanism still
+satisfies (config isolated, state shared). The reasoning below is the analysis that led to the
+rejection.
+
+---
+
 Claude Code supports:
 
 ```bash
@@ -399,7 +409,7 @@ Claude Code
 
 The deployment has one LeanCTX proxy instance, so ccbunshin exposes one configurable port. LeanCTX forwards Anthropic requests to that endpoint. ccbunshin inspects each request's `model` field and applies the ordered route rules from its JSON config.
 
-Route patterns use simple Go glob syntax: a pattern without `*` is an exact model match, while `claude-*` matches every model with that prefix. The default example routes `claude-*` to the SDC/paid gateway and `deepseek-v4-flash`, `qwen-3.8-27b`, and `gpt-oss-120b` to the free gateway. Users can edit providers, upstream URLs, route patterns, and model rewrites in the config file.
+Route patterns use simple Go glob syntax: a pattern without `*` is an exact model match, while `claude-*` matches every model with that prefix. The default example routes `claude-*` to the paid gateway and `deepseek-v4-flash`, `qwen-3.8-27b`, and `gpt-oss-120b` to the free gateway. Users can edit providers, upstream URLs, route patterns, and model rewrites in the config file.
 
 ```text
 Claude Code
@@ -409,13 +419,15 @@ LeanCTX :5000 or :4444
     │
     ▼
 ccbunshin proxy :3456
-    ├── claude-*       → SDC/paid gateway
+    ├── claude-*       → paid gateway
     ├── qwen-3.8-27b   → free gateway
     ├── deepseek-*     → free gateway
     └── gpt-oss-120b   → free gateway
 ```
 
 Authentication is not part of the proxy config. Claude Code's native auth settings and environment provide credentials; ccbunshin forwards the resulting authentication headers and never stores credentials.
+
+An optional `dialect` key on a provider or route selects the wire format: `anthropic` (the default) forwards the request unchanged, while `openai-chat` translates an Anthropic `/v1/messages` call onto an OpenAI-compatible `/chat/completions` call and translates the response back. The paragraph above still holds under it: the inbound credential is forwarded, never configured. See decision 8 and `docs/PLAN_OPENAI_CHAT_DIALECT.md`.
 
 Unknown or missing models must be rejected rather than routed by guesswork. A separate-listener deployment remains possible but is not the default architecture.
 

@@ -17,15 +17,21 @@ a per-key merge: a key set there replaces the same key in lower levels; omitted 
 State paths (`~/.claude/projects`, `history.jsonl`, `todos/`, `skills/`, `$HOME/.claude.json`) are
 never relocated - shared by construction.
 
-`CLAUDE_CONFIG_DIR` was rejected because it relocates state too, forcing a version-fragile symlink
-map.
+`CLAUDE_CONFIG_DIR` was rejected because it is all-or-nothing: it relocates settings, session
+history, plugins, and `.claude.json` together, so it is not settings-only isolation and would force
+a version-fragile symlink map to restore the shared state. For the same `--settings` mechanism in
+other tools, see `docs/PRIOR_ART.md`.
 
 ## 2. Env blocks merge per-variable, verified
 
-Two rules, and both matter: a variable set in two files resolves to the higher-precedence one, and
-a variable set *only* in a lower file survives - a higher file's `env` block does not blank the
-lower one. That is what lets a profile name one variable and inherit the rest of the user's env
-block, which is the whole premise of decision 1.
+An `env` block beats the process environment: exporting a variable in the shell does not override
+the same key in a settings file, which is why per-profile isolation has to happen at the settings
+layer rather than through exported variables.
+
+Two rules govern the merge, and both matter: a variable set in two files resolves to the
+higher-precedence one, and a variable set *only* in a lower file survives - a higher file's `env`
+block does not blank the lower one. That is what lets a profile name one variable and inherit the
+rest of the user's env block, which is the whole premise of decision 1.
 
 Verified 2026-09-12 with a `SessionStart` hook dumping `env` from a session launched with
 `--settings`: a probe variable set only in user settings and one set only in `--settings` both
