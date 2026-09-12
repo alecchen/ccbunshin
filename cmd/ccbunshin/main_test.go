@@ -724,6 +724,59 @@ func TestInitIsIdempotent(t *testing.T) {
 	}
 }
 
+// uninstall must reverse init exactly: the hook, its comment, and the blank line
+// init added all go, and nothing the user wrote does.
+func TestUninstallRemovesOnlyItsOwnHook(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+
+	original := "# my bashrc\nexport EDITOR=vim\n"
+	bashrc := home + "/.bashrc"
+	if err := os.WriteFile(bashrc, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := initCLI(); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallCLI(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Errorf("bashrc after uninstall =\n%q\nwant\n%q", data, original)
+	}
+	// The profiles the user created are not uninstall's to delete.
+	if _, err := os.Stat(profilesDir()); err != nil {
+		t.Errorf("uninstall removed the profile directory: %v", err)
+	}
+}
+
+// A hand-written hook is left alone: uninstall matches the line init wrote, so it
+// cannot tell a manual hook from a generated one and must not guess.
+func TestUninstallLeavesHandWrittenHook(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	manual := "# mine\neval \"$(ccbunshin init bash --custom)\"\n"
+	bashrc := home + "/.bashrc"
+	if err := os.WriteFile(bashrc, []byte(manual), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallCLI(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != manual {
+		t.Errorf("bashrc after uninstall =\n%q\nwant it untouched:\n%q", data, manual)
+	}
+}
+
 func TestTcshInitIsBackquoteSafe(t *testing.T) {
 	script, err := shellInit("tcsh")
 	if err != nil {

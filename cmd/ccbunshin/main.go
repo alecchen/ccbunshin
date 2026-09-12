@@ -1012,7 +1012,60 @@ func deleteProfile(name string) error {
 	}
 	return os.Remove(file)
 }
-func uninstallCLI() error { return nil }
+
+// uninstallCLI removes the wrapper hooks `ccbunshin init` appended. It matches the exact
+// line init wrote, so a hand-edited hook is left where it is; the comment line and blank
+// line init added above the hook go with it. The profile directory is deliberately left
+// alone: it holds profiles the user created, and deleting them is `ccbunshin delete`'s job.
+func uninstallCLI() error {
+	hooks := []struct{ file, marker string }{
+		{".bashrc", `eval "$(ccbunshin init bash)"`},
+		{".zshrc", `eval "$(ccbunshin init zsh)"`},
+		{".tcshrc", "eval `ccbunshin init tcsh`"},
+		{".cshrc", "eval `ccbunshin init tcsh`"},
+	}
+	removedAny := false
+	for _, hook := range hooks {
+		rc := path.Join(home(), hook.file)
+		data, err := os.ReadFile(rc)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var kept []string
+		removed := 0
+		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+			if strings.TrimSpace(line) == hook.marker {
+				removed++
+				// init wrote a comment line above the hook and a blank line above
+				// that; both are ours, so they go with it.
+				if n := len(kept); n > 0 && kept[n-1] == "# ccbunshin project-aware claude wrapper" {
+					kept = kept[:n-1]
+					if n := len(kept); n > 0 && strings.TrimSpace(kept[n-1]) == "" {
+						kept = kept[:n-1]
+					}
+				}
+				continue
+			}
+			kept = append(kept, line)
+		}
+		if removed == 0 {
+			continue
+		}
+		body := strings.Join(kept, "\n") + "\n"
+		if err := os.WriteFile(rc, []byte(body), 0600); err != nil {
+			return err
+		}
+		removedAny = true
+		fmt.Printf("removed: %s no longer hooks %s\n", rc, hook.file)
+	}
+	if !removedAny {
+		fmt.Println("ok: no ccbunshin hooks found in any shell rc file")
+	}
+	return nil
+}
 
 func doctorProfile(name string) error {
 	file, err := profilePath(name)
@@ -1455,6 +1508,7 @@ Commands:
   status <name>                    show a profile path and model
   doctor <name>                    check a profile for missing keys
   delete <name>                    delete a profile
+  uninstall                        remove the shell hooks init installed
   proxy <init|start|stop|status>   manage the model-routed proxy
   update                           update to the latest release
   version                          print the binary version
@@ -1540,6 +1594,14 @@ Warn about missing "env", "hooks", or "model" keys in the profile.
 		return `usage: ccbunshin delete <name>
 
 Remove ~/.claude-profiles/<name>.json.
+`, true
+	case "uninstall":
+		return `usage: ccbunshin uninstall
+
+Remove the wrapper hooks "ccbunshin init" appended to ~/.bashrc, ~/.zshrc,
+~/.tcshrc, and ~/.cshrc. Only the line init wrote and the comment above it are
+removed; hand-written hooks and your profiles are left alone. Start a new shell
+afterwards for the change to take effect.
 `, true
 	case "proxy":
 		return `usage: ccbunshin proxy <init|start|stop|status> [--force]
@@ -1691,6 +1753,9 @@ func runCLI(args []string) error {
 		}
 		return deleteProfile(args[1])
 	case "uninstall":
+		if len(args) != 1 {
+			return usageError("uninstall", "uninstall takes no arguments")
+		}
 		return uninstallCLI()
 	case "proxy":
 		if len(args) < 2 {
