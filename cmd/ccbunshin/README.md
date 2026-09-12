@@ -7,8 +7,14 @@ This directory contains the Go executable. It manages profiles, launches Claude 
 From the repository root:
 
 ```sh
-go -C cmd/ccbunshin build -o ccbunshin
+go -C cmd/ccbunshin build -ldflags "-X main.buildTime=$(date +%Y%m%d-%H%M)" -o ccbunshin
 ```
+
+`ccbunshin version` then reports `<short commit>-<build time>`, for example
+`e17b3c5-20260912-1453`. The commit comes from the toolchain's VCS stamping and
+needs no flag, shortened to 7 characters; the time comes from the `-ldflags`
+stamp. Omit the stamp for a commit-only identity. Release builds are stamped
+`-X main.version=<tag>` by the release workflow and report the tag.
 
 Cross-compile for Linux:
 
@@ -28,6 +34,8 @@ env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 ccbunshin init [bash|zsh|tcsh]
 ccbunshin create <name> [--from <file>] [--force]
 ccbunshin launch [<name>] [claude args...]
+ccbunshin local [<name>|--unset]
+ccbunshin global [<name>|--unset]
 ccbunshin model <name> <model>
 ccbunshin list
 ccbunshin status <name>
@@ -72,7 +80,7 @@ eval "$(ccbunshin init zsh)"
 eval `ccbunshin init tcsh`
 ```
 
-Inside a project, `claude` behaves as `ccbunshin launch <provider>`; outside one it runs the original Claude Code command with the original arguments. The wrapper reuses the existing `.ccbunshin-profile` marker and delegates project discovery to the ccbunshin binary, so it never parses profile files itself.
+Inside a project, `claude` behaves as `ccbunshin launch <provider>`; outside one it uses the global profile from `ccbunshin global <name>`, or the original Claude Code command with the original arguments when no global profile is set. The wrapper reuses the existing `.ccbunshin-profile` marker and delegates project discovery to the ccbunshin binary, so it never parses profile files itself.
 
 Bash and zsh install a `claude` shell function that resolves the provider by calling `ccbunshin resolve-provider`. tcsh cannot express conditional aliases, so it installs a `claude` alias that delegates to `ccbunshin run`, the internal command that resolves the nearest project provider or falls back to the original `claude` binary. `ccbunshin resolve-provider` and `ccbunshin run` are internal but callable. Re-running eval is idempotent: no nested wrappers or duplicate aliases.
 
@@ -113,13 +121,49 @@ that wrote its PID under `~/.cache/ccbunshin`.
 
 Routes select the provider; `models` rewrites the model ID after routing.
 
-The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), optionally rewrites the model via the provider's `models` map, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
+The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
 
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream.
-- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected.
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), and `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream).
+
+## Translating providers
+
+A provider that speaks OpenAI's `/chat/completions` rather than Anthropic's `/v1/messages` needs `"dialect": "openai-chat"`. The proxy then translates in both directions:
+
+- Anthropic `system`, content blocks, `tools`, and `tool_choice` become their chat-completions equivalents. `tool_result` becomes a `role: "tool"` message placed before the turn it answers, and `tool_use` arguments become a JSON string.
+- Upstream `reasoning` becomes Anthropic `thinking` blocks, streaming and non-streaming. **`reasoning_effort` is never sent**: deriving it from `thinking` is what broke requests against the upstream this was built for, so reasoning is recovered from the response instead. `thinking` itself is not forwarded either.
+- `POST /v1/messages/count_tokens` is answered locally with a character-based estimate, since such upstreams often do not implement it. The estimate is approximate by design.
+- Upstream errors are rewrapped in Anthropic's `{"type": "error", ...}` envelope at the same status, keeping the upstream's message, so a client that classifies errors on that shape still works and a wrong mapping is legible.
+- Prompt-cache breakpoints (`cache_control`) are dropped, since chat-completions has no equivalent. Every turn is a cold prefill.
+
+Dialect resolution is most-specific-first: the route's `model_dialects` entry for the target model, then the route's `dialect`, then the provider's `dialect`, then `anthropic`. Because the dialect is per model, one upstream can serve both kinds at once, as long as its routes live in different namespaces: `claude-*` and, say, `vertex-claude-*` do not collide, since a pattern matches the whole model string.
+
+Two things to know when configuring it:
+
+- A route with dialect `openai-chat` needs somewhere to get an acceptable model ID, or `proxy start` refuses the config. Set `default_model` on the provider, or `models` on the provider or route.
+- A misspelled dialect key is ignored rather than rejected, so the provider silently stays on the default. The config format intentionally allows unknown keys; check the spelling if a provider seems untranslated.
+
+To find out which endpoint a gateway expects for a given model, POST a one-token request to its `/messages` path and read which endpoint the error names. Model lists often do not say, and an ID's prefix is not a reliable signal.
+
+## Resolving a model ID
+
+`GET /ccbunshin/resolve?model=<id>` reports what a request model routes to, answered from the route table:
+
+```sh
+curl -s 'http://127.0.0.1:3456/ccbunshin/resolve?model=claude-opus-5'
+# {"dialect":"openai-chat","requested":"claude-opus-5","target":"oss-model"}
+```
+
+`target` is the ID sent upstream, provider prefix included. An unrouted model returns 404 with `{"error": "no route matches this model"}`. Without `?model=` the whole route table is returned, so a client can discover the routes without reading the config file.
+
+This endpoint exists because a client cannot otherwise learn what its model ID became. A model list cannot answer it: a route is a glob (`claude-*`) with a `default_model`, so the set of matching models is not enumerable. `resolve` answers the specific question for the specific ID. A statusline uses it to show the real model name behind a Claude Code alias.
+
+`/model/info` and `/v1/models` are forwarded unchanged. `/model/info` carries no `model` field, so it cannot be dialect-dispatched or resolved, and a gateway that does not implement it returns its own 404.
+
+Authentication is forwarded, never configured: an inbound `Authorization: Bearer` is passed through, and an inbound `x-api-key` is promoted to `Authorization: Bearer`. No credential is read from or written to `proxy.json`.
 
 ## systemd
 
@@ -144,3 +188,20 @@ go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh
 sh tests/install-test.sh
 ```
+
+## Compatibility review
+
+The Anthropic API is versioned such that new *optional* request fields and new streaming
+event types can appear without a version bump. Both are additive, so the translator is
+written to ignore unknown request fields and unknown stream events rather than fail on
+them. Before a release, re-check that this still holds:
+
+- API versioning policy - https://platform.claude.com/docs/en/api/versioning
+- Anthropic API release notes - https://platform.claude.com/docs/en/release-notes/api
+- Claude Code release notes - https://platform.claude.com/docs/en/release-notes/claude-code
+- Claude Code changelog (raw, diffable) - https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md
+- Messages and headers reference - https://platform.claude.com/docs/en/api/messages and https://platform.claude.com/docs/en/api/beta-headers
+- Streaming event reference - https://platform.claude.com/docs/en/build-with-claude/streaming
+
+The Claude Code changelog is worth watching specifically, because it documents environment
+variables and endpoint behavior that affect a gateway rather than the model API.

@@ -30,9 +30,9 @@ func TestProviderForModel(t *testing.T) {
 			"paid": {},
 			"free": {},
 		},
-		routes: []route{
-			{Pattern: "claude-*", Provider: "paid"},
-			{Pattern: "qwen-3.8-27b", Provider: "free"},
+		routes: []loadedRoute{
+			{pattern: "claude-*", provider: "paid"},
+			{pattern: "qwen-3.8-27b", provider: "free"},
 		},
 	}
 	if _, ok := cfg.providerFor("claude-sonnet-4-5"); !ok {
@@ -68,7 +68,7 @@ func TestProxyForwardsRoutedRequest(t *testing.T) {
 		providers: map[string]loadedProvider{
 			"provider1": testProvider(t, upstream, map[string]string{"opus": "provider-model"}),
 		},
-		routes: []route{{Pattern: "opus", Provider: "provider1"}},
+		routes: []loadedRoute{{pattern: "opus", provider: "provider1"}},
 	}
 	handler := &proxy{config: cfg, client: upstream.Client()}
 	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages?x=1", strings.NewReader(`{"model":"opus"}`))
@@ -89,7 +89,7 @@ func TestProxyForwardsRoutedRequest(t *testing.T) {
 }
 
 func TestProxyRejectsUnroutedModel(t *testing.T) {
-	handler := &proxy{config: loadedConfig{routes: []route{}}, client: http.DefaultClient}
+	handler := &proxy{config: loadedConfig{routes: []loadedRoute{}}, client: http.DefaultClient}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"unknown"}`)))
 	if response.Code != http.StatusBadRequest {
@@ -147,13 +147,96 @@ func TestLocalProfileCommands(t *testing.T) {
 	}
 }
 
-func TestReadLocalProfileRejectsMultipleLines(t *testing.T) {
+func TestReadProfileNameRejectsMultipleLines(t *testing.T) {
 	file := t.TempDir() + "/" + localProfileFile
 	if err := os.WriteFile(file, []byte("paid\nfree\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readLocalProfile(file); err == nil {
-		t.Fatal("readLocalProfile accepted multiple lines")
+	if _, err := readProfileName(file); err == nil {
+		t.Fatal("readProfileName accepted multiple lines")
+	}
+}
+
+func TestGlobalProfileCommands(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if _, err := readProfileName(globalProfilePath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("global profile before set = %v", err)
+	}
+	if err := setGlobalProfile("paid"); err != nil {
+		t.Fatal(err)
+	}
+	name, file, err := findGlobalProfile()
+	if err != nil || name != "paid" || file != globalProfilePath() {
+		t.Fatalf("findGlobalProfile() = %q, %q, %v", name, file, err)
+	}
+	if err := unsetGlobalProfile(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findGlobalProfile(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("findGlobalProfile after unset = %v", err)
+	}
+	if err := unsetGlobalProfile(); err != nil {
+		t.Fatalf("unsetGlobalProfile is not idempotent: %v", err)
+	}
+}
+
+// TestFindProfilePrefersLocalOverGlobal pins the pyenv-style layering: a local
+// marker wins for its directory and descendants, the global applies elsewhere.
+func TestFindProfilePrefersLocalOverGlobal(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("free"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	if err := os.MkdirAll(proj, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localProfilePath(proj), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ dir, want string }{
+		{proj, "paid"},
+		{filepath.Join(proj, "deep"), "paid"},
+		{root, "free"},
+	}
+	for _, tc := range cases {
+		name, _, err := findProfile(tc.dir)
+		if err != nil || name != tc.want {
+			t.Errorf("findProfile(%s) = %q, %v; want %q", tc.dir, name, err, tc.want)
+		}
+	}
+}
+
+func TestFindProfileWithoutLocalOrGlobalFails(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if _, _, err := findProfile(t.TempDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("findProfile with no selection = %v", err)
+	}
+}
+
+func TestGlobalCLIStatusAndUsage(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := globalCLI([]string{"paid"}); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := globalCLI(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "profile: paid") || !strings.Contains(out, globalProfilePath()) {
+		t.Fatalf("global status = %q", out)
+	}
+	if err := globalCLI([]string{"--unset"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := globalCLI(nil); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("global with no selection = %v, want usage error", err)
+	}
+	if err := globalCLI([]string{"a", "b"}); err == nil {
+		t.Fatal("global accepted two arguments")
 	}
 }
 
@@ -208,11 +291,40 @@ func TestResolveLaunchDashFirstUsesLocal(t *testing.T) {
 
 func TestResolveLaunchNoNameNoMarkerFails(t *testing.T) {
 	chdirT(t, t.TempDir())
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
 	if _, _, err := resolveLaunch([]string{"-p", "hi"}); err == nil {
-		t.Fatal("resolveLaunch accepted dash args without a local profile")
+		t.Fatal("resolveLaunch accepted dash args without a local or global profile")
 	}
 	if _, _, err := resolveLaunch(nil); err == nil {
-		t.Fatal("resolveLaunch accepted no args without a local profile")
+		t.Fatal("resolveLaunch accepted no args without a local or global profile")
+	}
+}
+
+func TestResolveLaunchUsesGlobalOutsideProject(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("free"); err != nil {
+		t.Fatal(err)
+	}
+	chdirT(t, t.TempDir())
+	name, claudeArgs, err := resolveLaunch([]string{"-p", "hi"})
+	if err != nil || name != "free" || !sameArgs(claudeArgs, []string{"-p", "hi"}) {
+		t.Fatalf("resolveLaunch() = %q, %q, %v", name, claudeArgs, err)
+	}
+}
+
+func TestResolveLaunchLocalBeatsGlobal(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("free"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	chdirT(t, root)
+	if err := os.WriteFile(localProfilePath(root), []byte("paid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name, _, err := resolveLaunch(nil)
+	if err != nil || name != "paid" {
+		t.Fatalf("resolveLaunch() = %q, %v; want local profile to win", name, err)
 	}
 }
 
@@ -246,7 +358,11 @@ func TestBuildClaudeCommandForwardsArgs(t *testing.T) {
 	}
 }
 
+// TestResolveProvider pins the no-selection case: with no global profile set,
+// resolveProvider stays "" outside a project, which is what keeps the shell
+// wrapper falling back to the plain claude binary.
 func TestResolveProvider(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
 	root := t.TempDir()
 	marker := func(dir, name string) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
@@ -300,6 +416,78 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
+func TestFormatLocalVersion(t *testing.T) {
+	cases := []struct {
+		sha, stamp, want string
+	}{
+		{"abc1234", "20260911-1130", "abc1234-20260911-1130"},
+		{"abc1234", "", "abc1234"},
+		{"", "20260911-1130", "20260911-1130"},
+		{"", "", ""},
+		{"  abc1234  ", "  20260911-1130  ", "abc1234-20260911-1130"},
+	}
+	for _, tc := range cases {
+		if got := formatLocalVersion(tc.sha, tc.stamp); got != tc.want {
+			t.Errorf("formatLocalVersion(%q, %q) = %q, want %q", tc.sha, tc.stamp, got, tc.want)
+		}
+	}
+}
+
+// TestBuildCommitIsShortened guards the reported commit against the toolchain's
+// full 40-character revision, which is too long to read in a version string.
+func TestBuildCommitIsShortened(t *testing.T) {
+	commit := buildCommit()
+	if commit == "" {
+		t.Skip("no VCS stamping in this build (go test does not stamp)")
+	}
+	if len(commit) > shortCommitLength {
+		t.Errorf("buildCommit() = %q, want at most %d characters", commit, shortCommitLength)
+	}
+}
+
+// TestVersionStaysAReleaseTag pins the invariant updateCLI depends on: version
+// is compared against release tags verbatim, so a local build identifier must
+// never be written into it.
+func TestVersionStaysAReleaseTag(t *testing.T) {
+	if version == "" {
+		return
+	}
+	if _, err := time.Parse(buildTimeLayout, version); err == nil {
+		t.Errorf("version %q parses as a build stamp; local identifiers belong to printVersion", version)
+	}
+}
+
+func TestPrintVersionFallsBackToLocalBuild(t *testing.T) {
+	savedVersion, savedTime := version, buildTime
+	t.Cleanup(func() { version, buildTime = savedVersion, savedTime })
+
+	// Go only stamps VCS metadata when building a main package from a checkout,
+	// so a test binary may have no commit at all. Assert against whatever the
+	// environment provides rather than assuming the SHA is present.
+	version = ""
+	buildTime = "20260911-1130"
+	want := formatLocalVersion(buildCommit(), buildTime)
+	out := strings.TrimSpace(captureStdout(t, printVersion))
+	if out != want {
+		t.Fatalf("printVersion with a stamp = %q, want %q", out, want)
+	}
+
+	// A release tag wins over the local identifier, stamp or not.
+	version = "v9.9.9"
+	out = strings.TrimSpace(captureStdout(t, printVersion))
+	if out != "v9.9.9" {
+		t.Fatalf("printVersion with a release tag = %q, want v9.9.9", out)
+	}
+
+	// With no tag and no stamp the placeholder still appears rather than blank.
+	version = ""
+	buildTime = ""
+	out = strings.TrimSpace(captureStdout(t, printVersion))
+	if out == "" {
+		t.Fatal("printVersion printed nothing with no tag or stamp")
+	}
+}
+
 func TestAssetName(t *testing.T) {
 	cases := []struct {
 		goos, goarch, want string
@@ -323,7 +511,7 @@ func TestAssetName(t *testing.T) {
 }
 
 func TestCommandHelpCoversUsageCommands(t *testing.T) {
-	for _, name := range []string{"init", "create", "launch", "local", "model", "list", "status", "doctor", "delete", "proxy", "update", "version", "help"} {
+	for _, name := range []string{"init", "create", "launch", "local", "global", "model", "list", "status", "doctor", "delete", "proxy", "update", "version", "help"} {
 		text, ok := commandHelp(name)
 		if !ok || !strings.Contains(text, "usage: ccbunshin "+name) {
 			t.Errorf("commandHelp(%q) missing usage", name)
@@ -345,6 +533,7 @@ func TestCommandHelpCoversUsageCommands(t *testing.T) {
 func TestRunCLIUsageErrors(t *testing.T) {
 	chdirT(t, t.TempDir())
 	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	t.Cleanup(func() { _ = unsetGlobalProfile() })
 	cases := [][]string{
 		{"create"},
 		{"model"},
@@ -360,6 +549,8 @@ func TestRunCLIUsageErrors(t *testing.T) {
 		{"init", "fish"},
 		{"local", "a", "b"},
 		{"local"},
+		{"global", "a", "b"},
+		{"global"},
 		{"launch"},
 		{"bogus"},
 		{"help", "bogus"},

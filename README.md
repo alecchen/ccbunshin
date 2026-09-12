@@ -64,6 +64,7 @@ Example profile:
 ccbunshin init [bash|zsh|tcsh]
 ccbunshin create <name> [--from <file>] [--force]
 ccbunshin local [<name>|--unset]
+ccbunshin global [<name>|--unset]
 ccbunshin launch [<name>] [claude args...]
 ccbunshin model <name> <model>
 ccbunshin list
@@ -97,10 +98,23 @@ ccbunshin launch
 
 This writes a `.ccbunshin-profile` marker in the current directory. `ccbunshin launch` searches the current directory and its parents, with the nearest marker taking precedence. An explicit profile takes precedence over the local file. This project-local selection model is inspired by [rbenv](https://github.com/rbenv/rbenv)/[pyenv](https://github.com/pyenv/pyenv)'s local version model. Inspect or clear the current local selection with:
 
-```sh
 ccbunshin local
 ccbunshin local --unset
 ```
+
+Set a global profile as the fallback for every directory with no marker:
+
+```sh
+ccbunshin global provider1
+ccbunshin launch           # outside any project: uses provider1
+ccbunshin global           # profile: provider1
+ccbunshin global --unset
+```
+
+The global selection lives in `~/.claude-profiles/global` (or
+`$CCBUNSHIN_PROFILES_DIR/global`), so it is one file and no environment
+variable to keep exported. Local wins where a marker exists, global applies
+everywhere else, exactly like `pyenv local` and `pyenv global`.
 
 The lookup is performed by the executable, so this works unchanged from Bash, zsh, tcsh, and other shells.
 
@@ -139,7 +153,7 @@ claude -p "hello world"          # ccbunshin launch provider1 -p "hello world"
 claude --model sonnet --resume abc   # all arguments reach Claude unchanged
 ```
 
-Outside a project, `claude` runs the original Claude Code command with the original arguments. The nearest marker wins, so nested projects work, and the exit status of Claude is returned.
+Outside a project, `claude` uses the global profile when one is set with `ccbunshin global <name>`; with no local marker and no global profile it runs the original Claude Code command with the original arguments. The nearest marker wins, so nested projects work, and the exit status of Claude is returned.
 
 The wrapper reuses the existing `.ccbunshin-profile` marker created by `ccbunshin local <name>`; it introduces no new project marker. Bash and zsh define a `claude` shell function, tcsh an alias, so re-running eval is safe but replaces any `claude` function or alias you defined yourself. The original Claude Code binary remains callable and is what runs outside projects.
 
@@ -187,8 +201,12 @@ A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` m
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream.
-- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected.
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back.
+- `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), and `model_dialects` (a `{target model: dialect}` map overriding both).
+
+### Translating providers
+
+A gateway that speaks OpenAI's `/chat/completions` instead of Anthropic's `/v1/messages` needs `"dialect": "openai-chat"`. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; and rewraps upstream errors in Anthropic's error envelope. It never sends `reasoning_effort`, which several such gateways reject. See `cmd/ccbunshin/README.md` for the full behavior and the resolution order.
 
 See `examples/proxy.json` for the full example the `init` template is based on.
 
@@ -240,8 +258,21 @@ The first session sends `claude-sonnet-4-5`. The second sends `qwen-3.8-27b`. Th
 Build for the current machine:
 
 ```sh
-go -C cmd/ccbunshin build -o ccbunshin
+go -C cmd/ccbunshin build -ldflags "-X main.buildTime=$(date +%Y%m%d-%H%M)" -o ccbunshin
 ```
+
+A local build reports its own identity as `<short commit>-<build time>`:
+
+```sh
+ccbunshin version
+# e17b3c5-20260912-1453
+```
+
+The commit comes from the Go toolchain's VCS stamping, so it is present
+automatically when building from a checkout; the time comes from the
+`-ldflags` stamp above. Either part is dropped when unavailable, and a release
+build still reports its release tag instead. Release binaries are stamped by
+the GitHub Actions workflow via `-X main.version=<tag>`.
 
 Build Linux binaries from macOS:
 

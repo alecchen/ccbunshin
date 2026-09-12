@@ -93,7 +93,7 @@ claude-free  =  ccbunshin launch free  =  claude --settings ~/.claude-profiles/f
 claude-paid  =  ccbunshin launch paid  =  claude --settings ~/.claude-profiles/paid.json
 ```
 
-Each launch may name its profile explicitly, or use the nearest `.ccbunshin-profile` marker in the current directory or a parent. Explicit names take precedence. There is no global active profile state, so two profiles run simultaneously, in the same repository, without interference.
+Each launch may name its profile explicitly, or use the nearest `.ccbunshin-profile` marker in the current directory or a parent, falling back to the global selection outside any project. Explicit names take precedence. The global selection is a fallback, not shared mutable state: a launch resolves its profile from the marker, the global file, or the argument, in that order, so two profiles still run simultaneously, in the same repository, without interference.
 
 ## 4. Isolation map
 
@@ -116,6 +116,7 @@ ccbunshin init                        one-time: create ~/.claude-profiles/, inst
 ccbunshin create <name> [--from <file>]  scaffold a profile settings file from a template
 ccbunshin launch [<name>] [args...]  claude --settings <file> "$@"
 ccbunshin local [<name>|--unset]       set, show, or clear the directory-local profile
+ccbunshin global [<name>|--unset]      set, show, or clear the global (fallback) profile
 ccbunshin model <name> <model>        set the profile's default model
 ccbunshin list                        list profiles and the keys each covers
 ccbunshin status <name>               show profile file, diff vs global baseline
@@ -188,7 +189,15 @@ The `proxy/` Go service owns provider routing independently from LeanCTX. It sta
 
 Each Anthropic request must contain a model. Ordered glob routes select the provider: patterns without `*` are exact matches, while patterns such as `claude-*` match prefixes. Provider definitions contain upstream URLs, timeouts, and optional model rewrites. Authentication remains in Claude Code settings and environment through native mechanisms such as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper`; the proxy config contains no credentials.
 
-See `examples/proxy.json` and `proxy/README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
+### Protocol translation (`dialect`)
+
+A provider may declare `"dialect": "openai-chat"` when the upstream speaks OpenAI's `/chat/completions` API rather than Anthropic's `/v1/messages`. The proxy then translates one way only, Anthropic to OpenAI-chat, and translates the response back: `system`, content blocks, `tools`, and `tool_choice` on the request; `reasoning` to `thinking` blocks, `tool_calls` to `tool_use`, and `finish_reason` to `stop_reason` on the response. `/v1/messages/count_tokens` is answered locally with a character estimate, and upstream errors are rewrapped in Anthropic's error envelope at the same status.
+
+Dialect resolution is layered, most-specific first: a route's `model_dialects` entry for the target model, then the route's `dialect`, then the provider's `dialect`, then `anthropic`. The default is pass-through, so a config written before dialects existed behaves exactly as it did. Because the dialect is a property of the model rather than the provider, one gateway serving both kinds of model can be expressed with two routes in different namespaces.
+
+The translation deliberately never emits `reasoning_effort`. Deriving it from Anthropic's `thinking` is precisely the failure this replaces: the request is sent without any effort tier, and reasoning is recovered from the response's `reasoning` field instead. The `thinking` parameter itself is not forwarded either.
+
+See `examples/proxy.json` and `cmd/ccbunshin/README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
 
 The requirements doc describes the custom proxy that maps Claude Code requests to the FREE and PAID gateways while keeping LeanCTX responsible only for context optimization.
 

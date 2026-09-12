@@ -45,8 +45,8 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
 4. **Auth is out of scope**: Claude Code's native mechanisms handle it
    (`ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper`). ccbunshin never reads or
    writes credentials.
-5. **Scope**: config isolation, directory-local (`local`) profiles, project-aware
-   `claude` shell wrappers, the model-routed proxy, and self-update (`ccbunshin update`)
+5. **Scope**: config isolation, directory-local (`local`) profiles, a global fallback profile
+   (`global`), project-aware `claude` shell wrappers, the model-routed proxy, and self-update
    are implemented. Still out of scope: LeanCTX integration, GUI.
 6. **The internal switcher** (company tool) writes global `~/.claude/settings.json` and stays
    untouched; profile launches override it via `--settings`.
@@ -54,9 +54,22 @@ implemented as a single Go binary in `cmd/ccbunshin` and released under tags `v0
    file `ccbunshin local` writes) selects a project. Bash and zsh wrappers call
    `ccbunshin resolve-provider` and route to `ccbunshin launch <provider>`. tcsh cannot
    express a conditional alias, so its wrapper delegates to the internal `ccbunshin run`,
-   which resolves the provider or falls back to the original `claude` binary. Shell code
+   which resolves the provider or falls back to the original `claude` binary. Resolution is
+   `findProfile`: the nearest marker, then the global selection from `ccbunshin global`, then
+   nothing - so the global is a fallback and never overrides a project. Shell code
    never parses profile files and never maintains a Claude option list: `launch` forwards
    arguments unchanged and returns Claude's exit status.
+8. **The proxy's protocol translation is opt-in per provider and never sends
+   `reasoning_effort`.** `dialect` on a provider, route, or `model_dialects` entry selects
+   between `anthropic` (default, byte-for-byte pass-through) and `openai-chat` (Anthropic
+   `/v1/messages` translated onto OpenAI `/chat/completions`). Resolution is
+   most-specific-first, and because a dialect belongs to a model rather than a provider,
+   one gateway serving both kinds is expressed as two routes in different namespaces.
+   `reasoning_effort` is never emitted and `thinking` is never forwarded: deriving the
+   former from Anthropic `thinking` is the bug this replaces, and reasoning is recovered
+   from the upstream response instead. Credentials are forwarded,
+   never stored (reaffirms decision 4). Translation lives in `dialect.go`, `translate.go`,
+   and `stream.go`.
 
 ## Status
 
@@ -81,6 +94,24 @@ go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh   # project-aware claude wrapper across bash, zsh, tcsh
 sh tests/install-test.sh        # installer defaults to the latest GitHub release
 ```
+
+## Build identity
+
+`version` (ldflags `-X main.version=<tag>`) holds a **release tag only**. `updateCLI`
+feeds it straight to `compareVersions`, so a commit SHA there would corrupt the
+comparison. Local builds are identified separately: `printVersion` falls back to
+`localVersion()`, which joins the commit from the toolchain's VCS stamping
+(`debug.ReadBuildInfo`, setting `vcs.revision`, shortened to `shortCommitLength`
+= 7) with the `buildTime` ldflags stamp
+(`-X main.buildTime=<YYYYMMDD-HHMM>`, layout `buildTimeLayout`). Either half is
+dropped when unavailable. Build a local binary with:
+
+```sh
+go -C cmd/ccbunshin build -ldflags "-X main.buildTime=$(date +%Y%m%d-%H%M)" -o ccbunshin
+```
+
+Note that `go test` binaries carry no VCS stamping, so tests must not assume
+`buildCommit()` is non-empty.
 
 
 This repo is intended for public release; committed docs must contain no company-specific
