@@ -244,13 +244,17 @@ func (s *streamTranslator) finish() {
 	}
 	s.finished = true
 	s.closeBlock()
-	outputTokens := 0
+	// The estimate stands in for the upstream's count until usage arrives, at which
+	// point the reported figure supersedes it - including input_tokens, which the
+	// upstream knows exactly and estimateRequestTokens only approximates.
+	usage := map[string]any{
+		"input_tokens":                s.inputTokens,
+		"output_tokens":               (s.textChars + s.reasoningChars + 3) / 4,
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     0,
+	}
 	if s.usage != nil {
-		outputTokens = s.usage.CompletionTokens
-	} else {
-		// No usage was reported, so approximate from what was emitted rather than
-		// reporting zero.
-		outputTokens = (s.textChars + s.reasoningChars + 3) / 4
+		usage = anthropicUsageFromUpstream(s.usage)
 	}
 	s.emit("message_delta", map[string]any{
 		"type": "message_delta",
@@ -258,10 +262,7 @@ func (s *streamTranslator) finish() {
 			"stop_reason":   s.stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{
-			"input_tokens":  s.inputTokens,
-			"output_tokens": outputTokens,
-		},
+		"usage": usage,
 	})
 	s.emit("message_stop", map[string]any{"type": "message_stop"})
 }

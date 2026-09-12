@@ -514,8 +514,10 @@ func TestTranslateResponseEnvelope(t *testing.T) {
 		Model      string `json:"model"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
-			Input  int `json:"input_tokens"`
-			Output int `json:"output_tokens"`
+			Input         int `json:"input_tokens"`
+			Output        int `json:"output_tokens"`
+			CacheCreation int `json:"cache_creation_input_tokens"`
+			CacheRead     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 		Content []map[string]any `json:"content"`
 	}
@@ -532,8 +534,73 @@ func TestTranslateResponseEnvelope(t *testing.T) {
 	if decoded.Usage.Input != 11 || decoded.Usage.Output != 4 {
 		t.Fatalf("usage = %+v", decoded.Usage)
 	}
+	if decoded.Usage.CacheCreation != 0 || decoded.Usage.CacheRead != 0 {
+		t.Fatalf("cache = %d/%d, want zero when the upstream reported no hits",
+			decoded.Usage.CacheCreation, decoded.Usage.CacheRead)
+	}
 	if decoded.Content[0]["type"] != "text" {
 		t.Fatalf("content = %+v", decoded.Content)
+	}
+}
+
+// A reported cache hit is split out of input_tokens, so the fields still sum to
+// the upstream's prompt_tokens.
+func TestTranslateResponseSplitsCacheReadTokens(t *testing.T) {
+	body := `{"id":"gen_1","model":"oss-model","choices":[{"finish_reason":"stop",
+	  "message":{"content":"hi"}}],"usage":{"prompt_tokens":1000,"completion_tokens":9,
+	  "prompt_tokens_details":{"cached_tokens":768}}}`
+	out, err := translateOpenAIResponse([]byte(body), "claude-opus-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Usage struct {
+			Input         int `json:"input_tokens"`
+			Output        int `json:"output_tokens"`
+			CacheCreation int `json:"cache_creation_input_tokens"`
+			CacheRead     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Usage.CacheRead != 768 {
+		t.Fatalf("cache_read_input_tokens = %d, want 768", decoded.Usage.CacheRead)
+	}
+	if decoded.Usage.CacheCreation != 0 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 0", decoded.Usage.CacheCreation)
+	}
+	if total := decoded.Usage.Input + decoded.Usage.CacheCreation + decoded.Usage.CacheRead; total != 1000 {
+		t.Fatalf("input+cache = %d, want the upstream's prompt_tokens 1000", total)
+	}
+	if decoded.Usage.Output != 9 {
+		t.Fatalf("output_tokens = %d, want 9", decoded.Usage.Output)
+	}
+}
+
+// A response with no usage object at all still carries every key, as an integer:
+// a client dividing by their sum must not receive a missing field.
+func TestTranslateResponseWithoutUsageKeepsEveryKey(t *testing.T) {
+	body := `{"id":"gen_2","model":"oss-model","choices":[{"finish_reason":"stop",
+	  "message":{"content":"hi"}}]}`
+	out, err := translateOpenAIResponse([]byte(body), "claude-opus-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Usage map[string]any `json:"usage"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} {
+		value, ok := decoded.Usage[key]
+		if !ok {
+			t.Fatalf("usage is missing %s: %+v", key, decoded.Usage)
+		}
+		if _, ok := value.(float64); !ok {
+			t.Fatalf("%s = %v, want a number", key, value)
+		}
 	}
 }
 
