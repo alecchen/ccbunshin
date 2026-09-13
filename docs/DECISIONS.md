@@ -135,3 +135,33 @@ answers, and it still lets a file through that Claude Code refuses to start with
 `launch` re-reads and re-validates the profile immediately before `exec`, so a profile that goes bad
 is reported by name instead of opening a dialog. That check is shape-only: it does not duplicate
 Claude Code's key validation, and unknown keys stay Claude Code's business.
+
+## 11. `proxy stop` confirms the daemon is gone, and `restart` exists
+
+`stop` reports the PID it signalled, waits for the process to disappear, and fails if it does not,
+rather than deleting the PID file and printing "stopped" whatever happened. The wait matters because
+the daemon shuts down with a 5s bound of its own: removing the PID file on the way out made a proxy
+that was still draining connections, or still listening, indistinguishable from a stopped one - the
+next `start` could then see a bound port, and a `restart` would race its own predecessor.
+
+A signal that cannot be delivered at all is reported as a failure naming the PID, not swallowed:
+"the process is there and it is not ours to stop" is precisely what the PID file cannot show. A
+process that is already gone when the pid file says otherwise is reported as such and treated as
+stopped.
+
+`restart` is `stop` followed by `start`, in one command, because applying an edited config otherwise
+takes both. It deliberately starts a proxy when none was running instead of refusing: an
+unconditional restart is what a config-reload call site wants, and a stopped proxy is not an error
+there.
+
+`start`, `stop`, and `status` all name the PID. `start` is the one that writes it, so the report is
+read from the child it just spawned rather than from the file; `status` adds the log path and the
+uptime. Uptime is the PID file's mtime rounded to the second: the file is written once, at startup,
+so its mtime is the start time. That is an approximation - it does not survive someone touching the
+file - and it is one the alternative did not buy much over, since the only exact source would be a
+second liveness probe on the daemon's side.
+
+The rejected alternative was leaving `stop` silent and printing nothing on success, which is what the
+`nohup`-style convention suggests: exit status as the only report. Silent success is indistinguishable
+from a command that matched nothing, which is exactly the state `ccbunshin proxy start` used to leave
+the user in.

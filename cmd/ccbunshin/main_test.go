@@ -1185,6 +1185,101 @@ func TestProxyStartKeepsStateOutOfWorkingDirectory(t *testing.T) {
 	}
 }
 
+// start, stop, and restart name the pid they acted on, so a command that looks
+// silent is distinguishable from one that found nothing to do.
+func TestProxyStartAndStopReportThePID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := filepath.Join(home, "proxy.json")
+	writeProxyTestConfig(t, config)
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, true, 0))
+
+	output := captureStdout(t, func() {
+		if err := proxyStop(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy stopped") {
+		t.Errorf("proxyStop with nothing running = %q, want a stopped report", output)
+	}
+
+	output = captureStdout(t, func() {
+		if err := proxyStart(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Cleanup(func() { _ = proxyStop() })
+	_, pid, _, running := proxyRunningPID()
+	if !running {
+		t.Fatal("proxy start reported success but no proxy is running")
+	}
+	if !strings.Contains(output, "proxy started") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Errorf("proxyStart = %q, want it to name pid %d", output, pid)
+	}
+
+	output = captureStdout(t, func() {
+		if err := proxyStop(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy stopped") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Errorf("proxyStop = %q, want it to name pid %d", output, pid)
+	}
+	if _, _, _, running := proxyRunningPID(); running {
+		t.Error("proxy still running after stop")
+	}
+}
+
+// restart is stop followed by start: it replaces the daemon with a new pid, and
+// it works from a stopped state so a config change can be applied unconditionally.
+func TestProxyRestartReplacesTheDaemon(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := filepath.Join(home, "proxy.json")
+	writeProxyTestConfig(t, config)
+	t.Setenv("CCBUNSHIN_PROXY_CONFIG", config)
+	t.Setenv("CCBUNSHIN_PROXY_BIN", proxyStub(t, true, 0))
+
+	if err := proxyStart(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxyStop() })
+	_, first, _, running := proxyRunningPID()
+	if !running {
+		t.Fatal("proxy not running after start")
+	}
+
+	output := captureStdout(t, func() {
+		if err := proxyRestart(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "proxy stopped") || !strings.Contains(output, "proxy started") {
+		t.Errorf("proxyRestart = %q, want the stop and the start report", output)
+	}
+	_, second, _, running := proxyRunningPID()
+	if !running {
+		t.Fatal("proxy not running after restart")
+	}
+	if second == first {
+		t.Errorf("proxyRestart kept pid %d, want a new daemon", first)
+	}
+
+	// From a stopped state restart is still a start, not a refusal.
+	if err := proxyStop(); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := proxyRestart(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, _, _, running := proxyRunningPID(); !running {
+		t.Error("proxyRestart from a stopped state did not start a proxy")
+	}
+}
+
 // A config outside the user's own writable space (the systemd unit uses
 // /etc/ccbunshin/proxy.json) must not stop the proxy from starting.
 func TestProxyStartWithReadOnlyConfigDir(t *testing.T) {
@@ -1279,9 +1374,18 @@ func TestProxyStopFindsProxyFromLegacyStateDir(t *testing.T) {
 	if err := daemon.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Reaped as soon as it exits: stop waits for the process to be gone, and a
+	// child nobody has waited on stays visible as a zombie until it is. The
+	// channel is closed rather than sent on, so cleanup can wait on it after
+	// the test already has.
+	exited := make(chan struct{})
+	go func() {
+		_ = daemon.Wait()
+		close(exited)
+	}()
 	t.Cleanup(func() {
 		_ = daemon.Process.Kill()
-		_ = daemon.Wait()
+		<-exited
 	})
 	legacyPid := filepath.Join(legacyDir, "proxy.pid")
 	if err := os.WriteFile(legacyPid, []byte(strconv.Itoa(daemon.Process.Pid)), 0600); err != nil {
@@ -1308,10 +1412,8 @@ func TestProxyStopFindsProxyFromLegacyStateDir(t *testing.T) {
 	if _, err := os.Stat(legacyPid); err == nil {
 		t.Error("legacy pid file left behind after stop")
 	}
-	done := make(chan error, 1)
-	go func() { done <- daemon.Wait() }()
 	select {
-	case <-done:
+	case <-exited:
 	case <-time.After(5 * time.Second):
 		t.Error("legacy proxy still running after stop")
 	}

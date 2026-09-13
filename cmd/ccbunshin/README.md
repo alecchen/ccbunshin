@@ -111,6 +111,7 @@ The profile directory has mode `700`; profile files have mode `600`. Authenticat
 ccbunshin proxy init [--force]
 ccbunshin proxy start
 ccbunshin proxy status
+ccbunshin proxy restart
 ccbunshin proxy stop
 ```
 
@@ -137,6 +138,23 @@ instead of reporting success. It refuses to start a second daemon while one is
 running, and clears a stale PID file left by a crash or reboot rather than
 refusing to start. `status` and `stop` also find a proxy started by a release
 that wrote its PID under `~/.cache/ccbunshin`.
+
+Every lifecycle command reports what it did: `start` and `stop` name the PID,
+`stop` also reports how long the daemon had been up, and `status` adds the log
+path. `stop` waits for the daemon to exit and reports a process that would not
+stop instead of removing the PID file and calling it stopped. `restart` is `stop`
+followed by `start`, which is what picking up an edited config takes; it starts a
+proxy when none was running rather than refusing.
+
+```text
+$ ccbunshin proxy start
+proxy started (pid 51234, log ~/.config/ccbunshin/proxy.log)
+$ ccbunshin proxy status
+proxy running (pid 51234, up 2m0s, log ~/.config/ccbunshin/proxy.log)
+$ ccbunshin proxy restart
+proxy stopped (pid 51234, was up 2m4s)
+proxy started (pid 51290, log ~/.config/ccbunshin/proxy.log)
+```
 
 ### Log severity
 

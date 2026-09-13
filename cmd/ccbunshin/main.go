@@ -1352,7 +1352,7 @@ func proxyStart() error {
 	if _, err := parseLogLevel(os.Getenv(logEnv)); err != nil {
 		return err
 	}
-	if _, pid, running := proxyRunningPID(); running {
+	if _, pid, _, running := proxyRunningPID(); running {
 		return fmt.Errorf("proxy already running (pid %d); use status", pid)
 	}
 	cfg := proxyConfigPath()
@@ -1397,28 +1397,37 @@ func proxyStart() error {
 		}
 		return fmt.Errorf("proxy failed to start: %s (see %s)", reason, logPath())
 	case <-time.After(proxyStartGrace):
+		fmt.Printf("proxy started (pid %d, log %s)\n", command.Process.Pid, logPath())
 		return nil
 	}
 }
-func readPID(file string) (int, error) {
+
+// readPID reads a pid file and, since the proxy writes its pid once at startup,
+// the time it was written - which is the proxy's start time.
+func readPID(file string) (int, time.Time, error) {
+	info, err := os.Stat(file)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return 0, err
+		return 0, time.Time{}, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid < 1 {
-		return 0, fmt.Errorf("invalid proxy pid in %s", file)
+		return 0, time.Time{}, fmt.Errorf("invalid proxy pid in %s", file)
 	}
-	return pid, nil
+	return pid, info.ModTime(), nil
 }
 
-// proxyRunningPID returns the pid file and pid of a live proxy. It also finds a
-// proxy started by a release that still wrote its pid under ~/.cache, so an
-// upgrade can stop the daemon it inherited. A pid file whose process is gone is
-// removed rather than reported, so a crash or reboot cannot wedge proxy start.
-func proxyRunningPID() (string, int, bool) {
+// proxyRunningPID returns the pid file, pid, and start time of a live proxy. It
+// also finds a proxy started by a release that still wrote its pid under
+// ~/.cache, so an upgrade can stop the daemon it inherited. A pid file whose
+// process is gone is removed rather than reported, so a crash or reboot cannot
+// wedge proxy start.
+func proxyRunningPID() (string, int, time.Time, bool) {
 	for _, file := range []string{pidPath(), legacyPidPath()} {
-		pid, err := readPID(file)
+		pid, started, err := readPID(file)
 		if err != nil {
 			continue
 		}
@@ -1427,36 +1436,80 @@ func proxyRunningPID() (string, int, bool) {
 			_ = os.Remove(file)
 			continue
 		}
-		return file, pid, true
+		return file, pid, started, true
 	}
-	return "", 0, false
+	return "", 0, time.Time{}, false
 }
+
+// proxyUptime is how long the proxy has been up, from the pid file's timestamp.
+// It is approximate by nature: it measures from when the pid was written.
+func proxyUptime(started time.Time) time.Duration {
+	return time.Since(started).Round(time.Second)
+}
+
 func proxyStatus() error {
-	_, pid, running := proxyRunningPID()
+	_, pid, started, running := proxyRunningPID()
 	if !running {
 		fmt.Println("proxy stopped")
 		return nil
 	}
-	fmt.Printf("proxy running (pid %d)\n", pid)
+	fmt.Printf("proxy running (pid %d, up %s, log %s)\n", pid, proxyUptime(started), logPath())
 	return nil
 }
+
+// proxyStopGrace is how long stop waits for the daemon to exit. The daemon's own
+// shutdown bound is 5s, so this is the outer of the two.
+const proxyStopGrace = 10 * time.Second
+
 func proxyStop() error {
-	pidFile, pid, running := proxyRunningPID()
+	pidFile, pid, started, running := proxyRunningPID()
 	if !running {
-		fmt.Println("proxy stopped")
+		fmt.Println("proxy stopped (nothing was running)")
 		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		_ = os.Remove(pidFile)
+		fmt.Printf("proxy stopped (pid %d had already exited)\n", pid)
 		return nil
 	}
+	// A signal that cannot be delivered is the one failure the pid file cannot
+	// show: the process is there, and it is not ours to stop.
 	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return err
+		return fmt.Errorf("cannot stop proxy (pid %d): %w", pid, err)
+	}
+	if !waitForExit(process, proxyStopGrace) {
+		return fmt.Errorf("proxy (pid %d) did not exit within %s; it may still be running", pid, proxyStopGrace)
 	}
 	_ = os.Remove(pidFile)
-	fmt.Println("proxy stopped")
+	fmt.Printf("proxy stopped (pid %d, was up %s)\n", pid, proxyUptime(started))
 	return nil
+}
+
+// waitForExit polls until the process is gone. Signal 0 is the portable "is this
+// pid still there" probe: it is delivered to nothing, and fails once the pid is
+// free again.
+func waitForExit(process *os.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if process.Signal(syscall.Signal(0)) != nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// proxyRestart is stop followed by start, which is what picking up a config
+// change takes. Its output is the output of both halves: a proxy that was not
+// running is stopped with nothing to do rather than refused.
+func proxyRestart() error {
+	if err := proxyStop(); err != nil {
+		return err
+	}
+	return proxyStart()
 }
 
 // version is stamped at build time via -ldflags "-X main.version=<tag>".
@@ -1728,7 +1781,8 @@ Commands:
   doctor <name>                    check a profile for missing keys
   delete <name>                    delete a profile
   uninstall                        remove the shell hooks init installed
-  proxy <init|start|stop|status>   manage the model-routed proxy
+  proxy <init|start|stop|restart|status>
+                                   manage the model-routed proxy
   update [--force]                 update to the latest release
   version                          print the binary version
   help [<command>]                 show help, or help for one command
@@ -1823,12 +1877,15 @@ removed; hand-written hooks and your profiles are left alone. Start a new shell
 afterwards for the change to take effect.
 `, true
 	case "proxy":
-		return `usage: ccbunshin proxy <init|start|stop|status> [--force]
+		return `usage: ccbunshin proxy <init|start|stop|restart|status> [--force]
 
 Manage the model-routed proxy in the background. The config comes from
 $CCBUNSHIN_PROXY_CONFIG, default ~/.config/ccbunshin/proxy.json. PID and log
 always live in ~/.config/ccbunshin/, whatever the config path is. init writes a
 proxy.json template; --force overwrites an existing file.
+
+start, stop, and restart report what they did, including the pid; restart is stop
+followed by start, which is how a config change is picked up.
 `, true
 	case "update":
 		return `usage: ccbunshin update [--force]
@@ -1980,7 +2037,7 @@ func runCLI(args []string) error {
 		return uninstallCLI()
 	case "proxy":
 		if len(args) < 2 {
-			return usageError("proxy", "proxy requires init, start, stop, or status")
+			return usageError("proxy", "proxy requires init, start, stop, restart, or status")
 		}
 		switch args[1] {
 		case "init":
@@ -1993,6 +2050,8 @@ func runCLI(args []string) error {
 			return proxyStart()
 		case "stop":
 			return proxyStop()
+		case "restart":
+			return proxyRestart()
 		case "status":
 			return proxyStatus()
 		}
