@@ -46,6 +46,11 @@ build from that directory.
 - `docs/OPENCODE_ZEN.md` and `docs/OPENCODE_GO.md` - reference: the endpoint shape of those two
   gateways, which models each serves, and which dialect each group needs. Dated snapshots; re-verify
   against the live tables before trusting a model id.
+- `docs/HARNESS_PUBLISH_GATING.md` - harness engineering, not ccbunshin behavior: how to stop an
+  agent pushing, tagging, or publishing a release without approval. Covers `permissions.ask`, the
+  `PreToolUse` publish-gate hook, and the required-reviewer GitHub environment, with what each layer
+  catches and what it misses. Read before changing publishing/release setup, and before trusting any
+  claim that a gate "covers all git push operations".
 - `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
   documentation.
 
