@@ -110,5 +110,28 @@ therefore the upstream's `prompt_tokens`, which is what a client's context denom
 Do not "simplify" this back to passing `prompt_tokens` through as `input_tokens`: the same prefix
 would then be counted twice and every cache percentage would read 0 again.
 `cache_creation_input_tokens` has no upstream counterpart and is always `0`. Reported usage
-supersedes `estimateRequestTokens` for `input_tokens`, not just `output_tokens`, in the trailing
 `message_delta`.
+
+## 10. Profiles are written atomically and validated as objects
+
+A profile is handed to Claude Code with `--settings`, so its bytes are a contract with another
+program. Two properties follow, and both are enforced in `parseProfile` and `writeProfileFile`:
+
+The top level must be a JSON object. `json.Valid` is not enough: it accepts `null`, `[]`, and
+scalars, and Claude Code answers any of those with its "Settings Error" dialog naming the file
+rather than a message the user can act on. That dialog's `Expected object, but received undefined`
+line is a formatter fallback, not a description of the file - it is what every syntax-level failure
+renders as, which is why it names no useful value.
+
+Writes replace the file in one step (temp file plus `os.Rename`), so a reader sees the old profile
+or the new one and never a truncated write. Profiles are read early: a login can read one within
+seconds of a user session starting, while an update may be in flight. A half-written file reads as
+invalid JSON, and before this the only symptom was Claude Code's dialog.
+
+The rejected alternative was leaving both to the callers - `create` checking `json.Valid` while
+`model` wrote back whatever it had read. That is the same check in several places with two different
+answers, and it still lets a file through that Claude Code refuses to start with.
+
+`launch` re-reads and re-validates the profile immediately before `exec`, so a profile that goes bad
+is reported by name instead of opening a dialog. That check is shape-only: it does not duplicate
+Claude Code's key validation, and unknown keys stay Claude Code's business.

@@ -816,6 +816,119 @@ func TestListEmptyModel(t *testing.T) {
 	}
 }
 
+// TestProfileRejectsNonObjectTopLevel pins the shape Claude Code requires. A
+// profile whose top level is null or an array parses as valid JSON but makes
+// Claude Code open with its "Settings Error" dialog instead of a usable message,
+// so every entry point that writes or hands over a profile has to reject it.
+func TestProfileRejectsNonObjectTopLevel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	if err := profileCreate("provider1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"null\n", "[]\n", `"a string"` + "\n", "42\n"} {
+		source := filepath.Join(dir, "source.json")
+		if err := os.WriteFile(source, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := profileCreate("from-source", source, true); err == nil {
+			t.Errorf("profileCreate accepted %q, want an error", body)
+		}
+		file := filepath.Join(dir, "provider1.json")
+		if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildClaudeCommand("provider1", nil); err == nil {
+			t.Errorf("buildClaudeCommand accepted %q, want an error", body)
+		}
+		if err := doctorProfile("provider1"); err == nil {
+			t.Errorf("doctor accepted %q, want an error", body)
+		}
+		if err := setProfileModel("provider1", "sonnet"); err == nil {
+			t.Errorf("setProfileModel accepted %q, want an error", body)
+		}
+	}
+}
+
+// TestProfileCreateLeavesNoPartialFile covers the failure path: a rejected
+// profile must not leave the half-written file it was created from in place.
+func TestProfileCreateLeavesNoPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	source := filepath.Join(dir, "source.json")
+	if err := os.WriteFile(source, []byte("null\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := profileCreate("provider1", source, false); err == nil {
+		t.Fatal("profileCreate accepted a null profile")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "provider1.json")); !os.IsNotExist(err) {
+		t.Errorf("profile file exists after a rejected create: %v", err)
+	}
+}
+
+// TestProfileWriteIsAtomic reads a profile while it is being rewritten. The
+// reader must never observe a partial file, which is what a boot-time login
+// racing an update would otherwise see.
+func TestProfileWriteIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	if err := profileCreate("provider1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "provider1.json")
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := checkProfile(file); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := setProfileModel("provider1", fmt.Sprintf("model-%d", i)); err != nil {
+			close(stop)
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatalf("reader saw a partial profile: %v", err)
+	}
+}
+
+// TestListWarnsOnRejectedProfile keeps the inventory useful: a profile Claude
+// Code would refuse is reported, and the rest of the list still prints.
+func TestListWarnsOnRejectedProfile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	if err := profileCreate("good", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("null\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if err := runCLI([]string{"list"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "WARN broken") {
+		t.Errorf("list output = %q, want a warning for broken.json", output)
+	}
+	if !strings.Contains(output, "good\tmodel=(no model set)") {
+		t.Errorf("list output = %q, want the good profile still listed", output)
+	}
+}
+
 func TestInitAutoInstallsShellHooks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

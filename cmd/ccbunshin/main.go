@@ -963,13 +963,70 @@ func profileModel(file string) string {
 	if err != nil {
 		return ""
 	}
-	var payload struct {
-		Model string `json:"model"`
-	}
-	if json.Unmarshal(data, &payload) != nil {
+	payload, err := parseProfile(data)
+	if err != nil {
 		return ""
 	}
-	return payload.Model
+	model, _ := payload["model"].(string)
+	return model
+}
+
+// parseProfile decodes a profile the way Claude Code does: the top level has to
+// be a JSON object. json.Valid alone accepts null and [], both of which Claude
+// Code rejects with its settings dialog instead of a message naming the file.
+func parseProfile(data []byte) (map[string]any, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("top level must be a JSON object")
+	}
+	return payload, nil
+}
+
+// checkProfile re-reads a profile just before it is handed to Claude Code, so a
+// file that is not a settings object is reported here rather than in Claude
+// Code's settings dialog. It checks shape only; Claude Code validates the keys.
+func checkProfile(file string) error {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	if _, err := parseProfile(data); err != nil {
+		return fmt.Errorf("profile %s is not a settings object: %w", file, err)
+	}
+	return nil
+}
+
+// writeProfileFile replaces a profile in one step, so a reader sees either the
+// old file or the new one and never a truncated write. A login reads profiles
+// while they are still being written, and a half-written file reads as invalid.
+func writeProfileFile(file string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(file), "."+filepath.Base(file)+".*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, file); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func setProfileModel(name, model string) error {
@@ -981,8 +1038,8 @@ func setProfileModel(name, model string) error {
 	if err != nil {
 		return err
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
+	payload, err := parseProfile(data)
+	if err != nil {
 		return err
 	}
 	payload["model"] = model
@@ -991,7 +1048,7 @@ func setProfileModel(name, model string) error {
 		return err
 	}
 	updated = append(updated, '\n')
-	return os.WriteFile(file, updated, 0600)
+	return writeProfileFile(file, updated)
 }
 
 func listProfiles() error {
@@ -1007,8 +1064,18 @@ func listProfiles() error {
 			continue
 		}
 		name := strings.TrimSuffix(entry.Name(), ".json")
-		model := profileModel(path.Join(profilesDir(), entry.Name()))
-		if model == "" {
+		data, readErr := os.ReadFile(path.Join(profilesDir(), entry.Name()))
+		if readErr != nil {
+			fmt.Printf("WARN %s: %s\n", name, readErr)
+			continue
+		}
+		payload, parseErr := parseProfile(data)
+		if parseErr != nil {
+			fmt.Printf("WARN %s: claude would reject this profile: %s\n", name, parseErr)
+			continue
+		}
+		model, ok := payload["model"].(string)
+		if !ok || model == "" {
 			model = "(no model set)"
 		}
 		fmt.Printf("%s\tmodel=%s\n", name, model)
@@ -1177,9 +1244,9 @@ func doctorProfile(name string) error {
 	if err != nil {
 		return err
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return err
+	payload, err := parseProfile(data)
+	if err != nil {
+		return fmt.Errorf("%s: claude would reject this profile: %w", name, err)
 	}
 	for _, key := range []string{"env", "hooks", "model"} {
 		if _, ok := payload[key]; !ok {
@@ -1222,17 +1289,17 @@ func profileCreate(name, source string, force bool) error {
 	if err != nil {
 		return err
 	}
-	if !json.Valid(data) {
-		return fmt.Errorf("invalid JSON")
+	if _, err := parseProfile(data); err != nil {
+		return fmt.Errorf("invalid profile: %w", err)
 	}
-	return os.WriteFile(file, data, 0600)
+	return writeProfileFile(file, data)
 }
 func buildClaudeCommand(name string, args []string) (*exec.Cmd, error) {
 	file, err := profilePath(name)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(file); err != nil {
+	if err := checkProfile(file); err != nil {
 		return nil, err
 	}
 	command := exec.Command("claude", append([]string{"--settings", file}, args...)...)

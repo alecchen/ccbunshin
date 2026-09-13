@@ -64,6 +64,25 @@ ccbunshin launch provider1 -p "hello world"
 
 `ccbunshin launch` returns Claude's exit status, so `ccbunshin launch provider1 ...; echo $?` behaves like running Claude directly.
 
+A profile is a settings file consumed by another program, so two properties are enforced rather than
+assumed. Its top level has to be a JSON object: `null`, an array, or a scalar is valid JSON that
+Claude Code refuses to start with, and it answers with its own "Settings Error" dialog instead of a
+message naming the file. And writes replace the file in one step, so a reader - including a login
+reading profiles seconds after a session starts - never sees a truncated write.
+
+The checks live in one place each, `parseProfile` and `writeProfileFile`:
+
+```sh
+ccbunshin list          # reports a profile Claude Code would reject, and still lists the rest
+ccbunshin doctor bad    # exits non-zero, naming the file and the reason
+ccbunshin launch bad    # refuses before starting Claude Code, naming the file
+```
+
+`create`, `model`, and `launch` all go through the same shape check, so `ccbunshin create x --from f`
+rejects `f` if its top level is not an object, and `launch` re-reads the profile immediately before
+`exec` in case it changed in between. The check is shape-only: Claude Code still owns validation of
+the keys themselves, and unknown keys are not ccbunshin's business.
+
 ## Shell integration
 
 `ccbunshin init` (no args) detects `~/.bashrc`, `~/.zshrc`,
@@ -237,6 +256,16 @@ and `TestFailedRequestIsLoggedAtErrorLevel` for what each level writes.
 End to end, start the proxy with `CCBUNSHIN_LOG=debug`, send one request, and
 read `~/.config/ccbunshin/proxy.log`: a line per request plus the routing and
 usage lines.
+
+Profile shape and write atomicity are covered by `TestProfileRejectsNonObjectTopLevel`
+(every entry point that writes or hands over a profile rejects `null`, `[]`, and
+scalars), `TestProfileCreateLeavesNoPartialFile` (a rejected create leaves nothing
+behind), `TestProfileWriteIsAtomic` (a concurrent reader never observes a partial
+file), and `TestListWarnsOnRejectedProfile`. End to end, set
+`CCBUNSHIN_PROFILES_DIR` to a scratch directory, write `null` into one profile, and
+run `ccbunshin list`, `ccbunshin doctor broken`, and `ccbunshin launch broken`:
+each names the file and exits non-zero instead of opening Claude Code's settings
+dialog.
 
 ## Compatibility review
 

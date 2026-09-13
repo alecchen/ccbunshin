@@ -41,6 +41,11 @@ ccbunshin create provider2 --from examples/provider2.json
 
 Profiles live in `~/.claude-profiles/<name>.json`. The directory uses mode `700`, and profile files use mode `600`.
 
+A profile has to be a JSON object at the top level, and it is written in one step so a reader never
+sees a half-written file. `ccbunshin list` reports a profile Claude Code would reject instead of
+listing it, and `ccbunshin launch` checks the file again just before starting Claude Code, so a bad
+profile fails with a message naming the file rather than inside Claude Code's settings dialog.
+
 A profile can use Claude Code's normal authentication settings, including `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `apiKeyHelper`. If you put a token in a profile, protect that file. A local `apiKeyHelper` is usually a better choice than storing the token directly in JSON.
 
 Example profile:

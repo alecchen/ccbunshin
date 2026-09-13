@@ -65,6 +65,7 @@ making it quietly.
 7. The project-aware `claude` wrapper is a thin router over the `.ccbunshin-profile` marker.
 8. Translation is opt-in per provider; a caller's effort is forwarded, never derived from `thinking`.
 9. Usage reporting follows Anthropic's split, with cache reads subtracted out of `input_tokens`.
+10. Profiles are validated as JSON objects and written atomically (temp file plus rename).
 
 ## Status
 
