@@ -69,6 +69,16 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    # Server-side publish gate: the job waits here for a required reviewer, so no
+    # Release is created without a human. This is the only layer that survives
+    # --no-verify, a hook that did not load, or a script that pushes.
+    #
+    # The environment must be configured with required reviewers in
+    # Settings -> Environments. Referencing a name that does not exist will
+    # auto-create an unprotected environment, and the gate will silently do
+    # nothing. Do NOT enable "Prevent self-review": pushes carry the maintainer's
+    # identity, so that would leave the release unapprovable.
+    environment: release
     steps:
       - uses: actions/download-artifact@v8
         with:
