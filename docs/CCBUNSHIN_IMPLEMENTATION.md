@@ -134,6 +134,11 @@ claude-paid() { ccbunshin launch paid "$@"; }
 # generic: claude-<name>() { ccbunshin launch <name> "$@"; }
 ```
 
+Completion is the one piece of shell integration `ccbunshin init` deliberately does not
+install: `ccbunshin completion <bash|zsh>` prints the script and the user writes it where
+their shell already looks, because the two shells disagree about how a completion script is
+loaded (see the implementation notes for the zsh `fpath` caveat).
+
 ## 6. Auth - out of scope
 
 Claude Code has native credential mechanisms; ccbunshin never reads or writes credentials.
@@ -165,6 +170,14 @@ residue in global settings.
 - **Concurrency**: two profiles share state by construction - Claude Code keys session
   transcripts by session id. The tool needs no locking.
 - **Wrapper shells**: bash/zsh functions, tcsh aliases.
+- **Completion**: `completionScript` in `completion.go` emits a bash or zsh script; profile
+  names are read from `ccbunshin list` at completion time, so nothing is baked in. zsh needs
+  two entries activated two ways: compinit reads only the `#compdef` line at the top of a file
+  found on `fpath`, so a script that is merely on `fpath` registers the CLI but not the
+  `claude` wrapper. Sourcing the file from an rc file, after compinit, registers both; the
+  `claude` binding is guarded on the file actually being sourced so the two paths cannot
+  disagree. The scripts are generated, not shipped, so the command lists cannot drift from the
+  CLI - `TestCompletionCoversCommands` and `tests/completion-test.sh` check that.
 
 ## 9. Testing
 

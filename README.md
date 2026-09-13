@@ -80,8 +80,10 @@ ccbunshin proxy start
 ccbunshin proxy status
 ccbunshin proxy restart
 ccbunshin proxy stop
+ccbunshin completion <bash|zsh>
 ccbunshin update [--force]
 ccbunshin version
+ccbunshin help [<command>]
 ```
 
 `ccbunshin --help` prints this list; `ccbunshin help <command>` and
@@ -167,6 +169,37 @@ claude --model sonnet --resume abc   # all arguments reach Claude unchanged
 Outside a project, `claude` uses the global profile when one is set with `ccbunshin global <name>`; with no local marker and no global profile it runs the original Claude Code command with the original arguments. The nearest marker wins, so nested projects work, and the exit status of Claude is returned.
 
 The wrapper reuses the existing `.ccbunshin-profile` marker created by `ccbunshin local <name>`; it introduces no new project marker. Bash and zsh define a `claude` shell function, tcsh an alias, so re-running eval is safe but replaces any `claude` function or alias you defined yourself. The original Claude Code binary remains callable and is what runs outside projects.
+
+## Shell completion
+
+`ccbunshin completion <bash|zsh>` prints a completion script for the CLI, and for zsh
+also for the project-aware `claude` wrapper. Nothing is installed for you.
+
+Bash reads `$BASH_COMPLETION_USER_DIR/completions/ccbunshin` (default
+`~/.local/share/bash-completion/completions/ccbunshin`) at startup, so one write is
+enough:
+
+```sh
+ccbunshin completion bash > "${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/ccbunshin"
+```
+
+macOS's stock `/usr/bin/bash` does not read that directory: save the script anywhere
+and `source` it from `~/.bashrc` instead.
+
+For zsh, save it and source it from `~/.zshrc`, after `compinit` has run:
+
+```sh
+mkdir -p ~/.zsh/completions
+ccbunshin completion zsh > ~/.zsh/completions/_ccbunshin
+# then, in ~/.zshrc:
+source ~/.zsh/completions/_ccbunshin
+```
+
+Sourcing registers both completions. Putting the file on `fpath` instead (`fpath=(~/.zsh/completions $fpath)` before `compinit`) covers `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the rest, so the `claude` completion stays unregistered. Either way, re-running the script replaces the definitions rather than nesting them.
+
+At the prompt: subcommands complete for `ccbunshin`, `init` offers its shells, `proxy` its subcommands, and the profile-taking commands (`launch`, `model`, `status`, `doctor`, `delete`, `local`, `global`) offer the profiles that exist at that moment - the list comes from `ccbunshin list`, so a profile created later completes without regenerating the script. Inside a project, `claude` completes Claude Code's common options.
+
+Verify with `sh tests/completion-test.sh`, which builds the binary and drives both activation paths.
 
 ## Model routing (optional)
 
@@ -338,6 +371,7 @@ gofmt -w cmd/ccbunshin/*.go
 go -C cmd/ccbunshin vet ./...
 go -C cmd/ccbunshin test ./...   # includes the log-level and per-request-log tests
 sh tests/shell-integration.sh
+sh tests/completion-test.sh
 sh tests/install-test.sh
 ```
 

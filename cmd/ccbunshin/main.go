@@ -1052,19 +1052,12 @@ func setProfileModel(name, model string) error {
 }
 
 func listProfiles() error {
-	entries, err := os.ReadDir(profilesDir())
-	if os.IsNotExist(err) {
-		return nil
-	}
+	names, err := profileNames()
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		name := strings.TrimSuffix(entry.Name(), ".json")
-		data, readErr := os.ReadFile(path.Join(profilesDir(), entry.Name()))
+	for _, name := range names {
+		data, readErr := os.ReadFile(path.Join(profilesDir(), name+".json"))
 		if readErr != nil {
 			fmt.Printf("WARN %s: %s\n", name, readErr)
 			continue
@@ -1081,6 +1074,27 @@ func listProfiles() error {
 		fmt.Printf("%s\tmodel=%s\n", name, model)
 	}
 	return nil
+}
+
+// profileNames lists profile names in directory order. `list` prints one line
+// per name and the shell completion scripts parse those lines, so both go
+// through here rather than each walking the directory themselves.
+func profileNames() ([]string, error) {
+	entries, err := os.ReadDir(profilesDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(entry.Name(), ".json"))
+	}
+	return names, nil
 }
 
 // claudeInit is the claude wrapper shared by bash and zsh. It resolves the
@@ -1783,6 +1797,7 @@ Commands:
   uninstall                        remove the shell hooks init installed
   proxy <init|start|stop|restart|status>
                                    manage the model-routed proxy
+  completion <bash|zsh>            print a shell completion script
   update [--force]                 update to the latest release
   version                          print the binary version
   help [<command>]                 show help, or help for one command
@@ -1886,6 +1901,35 @@ proxy.json template; --force overwrites an existing file.
 
 start, stop, and restart report what they did, including the pid; restart is stop
 followed by start, which is how a config change is picked up.
+`, true
+	case "completion":
+		return `usage: ccbunshin completion <bash|zsh>
+
+Print a completion script for the CLI, and for zsh also for the project-aware
+"claude" wrapper. Nothing is installed for you: write the script where your
+shell already looks.
+
+  ccbunshin completion bash > "${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/ccbunshin"
+
+Bash sources that directory on startup, so the script needs no rc line and
+takes effect in the next shell. macOS's stock /usr/bin/bash does not read it;
+there, save the script anywhere and source it from ~/.bashrc.
+
+  mkdir -p ~/.zsh/completions
+  ccbunshin completion zsh > ~/.zsh/completions/_ccbunshin
+
+then source it from ~/.zshrc, after compinit has run (oh-my-zsh sources .zshrc
+after its own compinit):
+
+  source ~/.zsh/completions/_ccbunshin
+
+Sourcing registers both completions. Putting the file on fpath instead - with
+"fpath=(~/.zsh/completions $fpath)" before compinit - covers ccbunshin only:
+compinit reads the file's #compdef line and never runs the rest, so the claude
+completion stays unregistered.
+
+The commands offered come from the CLI and the profiles from "ccbunshin list",
+so neither list goes stale.
 `, true
 	case "update":
 		return `usage: ccbunshin update [--force]
@@ -2063,6 +2107,16 @@ func runCLI(args []string) error {
 		return resolveProviderCLI()
 	case "run":
 		return runProjectClaude(args[1:])
+	case "completion":
+		if len(args) != 2 {
+			return usageError("completion", "completion requires a shell: bash or zsh")
+		}
+		script, err := completionScript(args[1])
+		if err != nil {
+			return usageError("completion", err.Error())
+		}
+		fmt.Print(script)
+		return nil
 	case "update":
 		return updateCLI(args[1:])
 	case "version":

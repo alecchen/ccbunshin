@@ -165,3 +165,26 @@ The rejected alternative was leaving `stop` silent and printing nothing on succe
 `nohup`-style convention suggests: exit status as the only report. Silent success is indistinguishable
 from a command that matched nothing, which is exactly the state `ccbunshin proxy start` used to leave
 the user in.
+
+## 12. Completion scripts are generated, and `init` does not install them
+
+`ccbunshin completion <bash|zsh>` prints the script (`completion.go`); the source tree holds no
+completion files. A script that lives next to the CLI it describes cannot drift from it, and a
+generated one cannot either: the command list in it is checked against `topLevelCommands` by
+`TestCompletionCoversCommands`, and `tests/completion-test.sh` drives both shells. A shipped file
+would have to be regenerated for every command added, and would go stale in a checkout, a release
+binary, and an in-place `ccbunshin update` independently.
+
+`ccbunshin init` deliberately does not install it, for two reasons. The shells do not agree on where
+a completion script goes: bash sources `$BASH_COMPLETION_USER_DIR/completions/` (read by Homebrew's
+`bash-completion@2`, not by macOS's stock `/usr/bin/bash`) and zsh autoloads from `fpath`, and zsh
+has a trap in it - `compinit` reads only a file's leading `#compdef` line and never runs the rest, so
+a script that is only on `fpath` registers the CLI completion and silently not the `claude` one.
+Sourcing the file from an rc file, after compinit, registers both, and that is what the script's own
+header recommends. Installing into an rc file is also a different kind of change from the wrapper
+hook `init` appends: it needs a path the user chose, `uninstall` would have to reverse it, and a
+mistake there breaks the user's shell rather than one command.
+
+The rejected alternative was `init` writing the script itself and adding an `fpath` or `source` line
+to each rc file. It buys one saved command and costs a wrong default for half the users - the `fpath`
+form, the one that looks most natural for zsh, is the one that loses the `claude` completion.

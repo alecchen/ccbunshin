@@ -714,7 +714,7 @@ func TestAssetName(t *testing.T) {
 }
 
 func TestCommandHelpCoversUsageCommands(t *testing.T) {
-	for _, name := range []string{"init", "create", "launch", "local", "global", "model", "list", "status", "doctor", "delete", "proxy", "update", "version", "help"} {
+	for _, name := range []string{"init", "create", "launch", "local", "global", "model", "list", "status", "doctor", "delete", "proxy", "completion", "update", "version", "help"} {
 		text, ok := commandHelp(name)
 		if !ok || !strings.Contains(text, "usage: ccbunshin "+name) {
 			t.Errorf("commandHelp(%q) missing usage", name)
@@ -746,6 +746,9 @@ func TestRunCLIUsageErrors(t *testing.T) {
 		{"delete"},
 		{"proxy"},
 		{"proxy", "bogus"},
+		{"completion"},
+		{"completion", "fish"},
+		{"completion", "bash", "zsh"},
 		{"resolve-provider", "extra"},
 		{"list", "extra"},
 		{"init", "a", "b"},
@@ -1484,4 +1487,82 @@ func fakeGitHub(t *testing.T, payload string) {
 	// override of the base URL rather than DNS.
 	githubAPIBase = server.URL
 	t.Cleanup(func() { githubAPIBase = "https://api.github.com" })
+}
+
+func TestCompletionScripts(t *testing.T) {
+	for _, tc := range []struct {
+		shell  string
+		prefix string
+	}{
+		{"bash", "complete -F _ccbunshin ccbunshin"},
+		{"zsh", "compdef _ccbunshin ccbunshin"},
+	} {
+		script, err := completionScript(tc.shell)
+		if err != nil {
+			t.Fatalf("completionScript(%q): %v", tc.shell, err)
+		}
+		if !strings.Contains(script, tc.prefix) {
+			t.Errorf("%s completion does not register itself:\n%s", tc.shell, script)
+		}
+		// The scripts are run by a shell, so an unescaped backslash is a
+		// syntax error there rather than here.
+		if strings.Contains(script, "\\") {
+			t.Errorf("%s completion contains a backslash:\n%s", tc.shell, script)
+		}
+	}
+	if _, err := completionScript("tcsh"); err == nil {
+		t.Error("completionScript(tcsh) = nil, want an error")
+	}
+}
+
+// TestCompletionCoversCommands guards the lists the scripts keep by hand against
+// the CLI surface: a command missing from them is invisible at the prompt.
+func TestCompletionCoversCommands(t *testing.T) {
+	script, err := completionScript("zsh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash, err := completionScript("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range topLevelCommands {
+		if !strings.Contains(script, "'"+name+":") {
+			t.Errorf("zsh completion does not describe %q", name)
+		}
+		if !strings.Contains(bash, name) {
+			t.Errorf("bash completion does not offer %q", name)
+		}
+	}
+}
+
+func TestProfileNamesListsJSONOnly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", dir)
+	for _, file := range []string{"provider1.json", "provider2.json"} {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("{}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "nested.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	names, err := profileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, ",") != "provider1,provider2" {
+		t.Errorf("profileNames() = %q, want provider1,provider2", names)
+	}
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", filepath.Join(dir, "missing"))
+	names, err = profileNames()
+	if err != nil {
+		t.Fatalf("profileNames() on a missing directory: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("profileNames() on a missing directory = %q, want empty", names)
+	}
 }
