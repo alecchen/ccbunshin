@@ -175,27 +175,31 @@ The wrapper reuses the existing `.ccbunshin-profile` marker created by `ccbunshi
 `ccbunshin completion <bash|zsh>` prints a completion script for the CLI, and for zsh
 also for the project-aware `claude` wrapper. Nothing is installed for you.
 
-Bash reads `$BASH_COMPLETION_USER_DIR/completions/ccbunshin` (default
-`~/.local/share/bash-completion/completions/ccbunshin`) at startup, so one write is
-enough:
+Bash has no completion directory of its own, so save the script and source it from `~/.bashrc`:
 
 ```sh
-ccbunshin completion bash > "${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/ccbunshin"
+ccbunshin completion bash > ~/.ccbunshin-completion.bash
+# then, in ~/.bashrc:
+source ~/.ccbunshin-completion.bash
 ```
 
-macOS's stock `/usr/bin/bash` does not read that directory: save the script anywhere
-and `source` it from `~/.bashrc` instead.
-
-For zsh, save it and source it from `~/.zshrc`, after `compinit` has run:
+The separate [bash-completion](https://github.com/scop/bash-completion) package does have one, and where it is installed the script can go there instead with no rc line:
 
 ```sh
-mkdir -p ~/.zsh/completions
-ccbunshin completion zsh > ~/.zsh/completions/_ccbunshin
+ccbunshin completion bash > "${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/ccbunshin.bash"
+```
+
+Two conditions come with that: the file must be named `ccbunshin.bash` (bash-completion loads `<command>.bash` on demand and ignores other names), and nothing reads the directory until bash-completion itself has been sourced from an rc file - so that route needs an rc line too, just a different one.
+
+For zsh, save the script and source it from `~/.zshrc`, after `compinit` has run:
+
+```sh
+ccbunshin completion zsh > ~/.ccbunshin-completion.zsh
 # then, in ~/.zshrc:
-source ~/.zsh/completions/_ccbunshin
+source ~/.ccbunshin-completion.zsh
 ```
 
-Sourcing registers both completions. Putting the file on `fpath` instead (`fpath=(~/.zsh/completions $fpath)` before `compinit`) covers `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the rest, so the `claude` completion stays unregistered. Either way, re-running the script replaces the definitions rather than nesting them.
+Sourcing registers both completions and works from any path. zsh does have directories that are already on `fpath` (`/usr/share/zsh/5.9/functions`, `/usr/local/share/zsh/site-functions`, `/opt/homebrew/share/zsh/site-functions` on Homebrew), and dropping the file in one with the name `_ccbunshin` needs no rc line - but it covers `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the rest, so the `claude` completion stays unregistered. Either way, re-running the script replaces the definitions rather than nesting them.
 
 At the prompt: subcommands complete for `ccbunshin`, `init` offers its shells, `proxy` its subcommands, and the profile-taking commands (`launch`, `model`, `status`, `doctor`, `delete`, `local`, `global`) offer the profiles that exist at that moment - the list comes from `ccbunshin list`, so a profile created later completes without regenerating the script. Inside a project, `claude` completes Claude Code's common options.
 

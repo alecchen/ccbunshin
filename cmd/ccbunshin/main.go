@@ -1909,24 +1909,32 @@ Print a completion script for the CLI, and for zsh also for the project-aware
 "claude" wrapper. Nothing is installed for you: write the script where your
 shell already looks.
 
-  ccbunshin completion bash > "${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/ccbunshin"
+  ccbunshin completion bash > ~/.ccbunshin-completion.bash
 
-Bash sources that directory on startup, so the script needs no rc line and
-takes effect in the next shell. macOS's stock /usr/bin/bash does not read it;
-there, save the script anywhere and source it from ~/.bashrc.
+then source it from ~/.bashrc:
 
-  mkdir -p ~/.zsh/completions
-  ccbunshin completion zsh > ~/.zsh/completions/_ccbunshin
+  source ~/.ccbunshin-completion.bash
+
+That is the route that works everywhere: bash has no completion directory of
+its own, and the on-demand one belongs to the separate bash-completion package,
+which many macOS installs do not have. Where it is installed, the script can
+instead go in $BASH_COMPLETION_USER_DIR/completions (default
+~/.local/share/bash-completion/completions) with no rc line - but it must be
+named ccbunshin.bash, since the loader looks for <command>.bash and ignores
+other names.
+
+  ccbunshin completion zsh > ~/.ccbunshin-completion.zsh
 
 then source it from ~/.zshrc, after compinit has run (oh-my-zsh sources .zshrc
 after its own compinit):
 
-  source ~/.zsh/completions/_ccbunshin
+  source ~/.ccbunshin-completion.zsh
 
-Sourcing registers both completions. Putting the file on fpath instead - with
-"fpath=(~/.zsh/completions $fpath)" before compinit - covers ccbunshin only:
-compinit reads the file's #compdef line and never runs the rest, so the claude
-completion stays unregistered.
+Sourcing registers both completions and works from any path. Putting the file
+on fpath instead - a directory already on it, such as
+/opt/homebrew/share/zsh/site-functions, or one added with fpath=(...) before
+compinit - covers ccbunshin only: compinit reads the file's #compdef line and
+never runs the rest, so the claude completion stays unregistered.
 
 The commands offered come from the CLI and the profiles from "ccbunshin list",
 so neither list goes stale.

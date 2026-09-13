@@ -176,14 +176,15 @@ would have to be regenerated for every command added, and would go stale in a ch
 binary, and an in-place `ccbunshin update` independently.
 
 `ccbunshin init` deliberately does not install it, for two reasons. The shells do not agree on where
-a completion script goes: bash sources `$BASH_COMPLETION_USER_DIR/completions/` (read by Homebrew's
-`bash-completion@2`, not by macOS's stock `/usr/bin/bash`) and zsh autoloads from `fpath`, and zsh
-has a trap in it - `compinit` reads only a file's leading `#compdef` line and never runs the rest, so
-a script that is only on `fpath` registers the CLI completion and silently not the `claude` one.
-Sourcing the file from an rc file, after compinit, registers both, and that is what the script's own
-header recommends. Installing into an rc file is also a different kind of change from the wrapper
-hook `init` appends: it needs a path the user chose, `uninstall` would have to reverse it, and a
-mistake there breaks the user's shell rather than one command.
+a completion script goes: sourcing from the rc file is the only route bash has (it reads no
+completion directory of its own - the on-demand one belongs to the separate `bash-completion`
+package, which loads `<command>.bash` and only after it has itself been sourced), and zsh autoloads
+from `fpath`, where it has a trap of its own - `compinit` reads only a file's leading `#compdef`
+line and never runs the rest, so a script that is only on `fpath` registers the CLI completion and
+silently not the `claude` one. Sourcing the file from an rc file, after compinit, registers both,
+and that is what the script's own header recommends. Installing into an rc file is also a different
+kind of change from the wrapper hook `init` appends: it needs a path the user chose, `uninstall`
+would have to reverse it, and a mistake there breaks the user's shell rather than one command.
 
 The rejected alternative was `init` writing the script itself and adding an `fpath` or `source` line
 to each rc file. It buys one saved command and costs a wrong default for half the users - the `fpath`
