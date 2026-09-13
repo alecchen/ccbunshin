@@ -1906,35 +1906,34 @@ followed by start, which is how a config change is picked up.
 		return `usage: ccbunshin completion <bash|zsh>
 
 Print a completion script for the CLI, and for zsh also for the project-aware
-"claude" wrapper. Nothing is installed for you: write the script where your
-shell already looks.
+"claude" wrapper. Nothing is installed for you and no directory has to be
+created: write the script to a file in your home directory and source it from
+the rc file your shell reads.
 
   ccbunshin completion bash > ~/.ccbunshin-completion.bash
+  ccbunshin completion zsh  > ~/.ccbunshin-completion.zsh
 
-then source it from ~/.bashrc:
+  ~/.bashrc        source ~/.ccbunshin-completion.bash   # Linux, and macOS bash
+                   when ~/.bash_profile sources ~/.bashrc
+  ~/.bash_profile  the same line on macOS, where a terminal bash is a login
+                   shell and never reads ~/.bashrc
+  ~/.zshrc         source ~/.ccbunshin-completion.zsh    # after compinit: with
+                   oh-my-zsh, which sources .zshrc after its own compinit
 
-  source ~/.ccbunshin-completion.bash
+If the shell already has a completions directory of its own, the script can go
+there instead, with no line naming the script itself:
 
-That is the route that works everywhere: bash has no completion directory of
-its own, and the on-demand one belongs to the separate bash-completion package,
-which many macOS installs do not have. Where it is installed, the script can
-instead go in $BASH_COMPLETION_USER_DIR/completions (default
-~/.local/share/bash-completion/completions) with no rc line - but it must be
-named ccbunshin.bash, since the loader looks for <command>.bash and ignores
-other names.
-
-  ccbunshin completion zsh > ~/.ccbunshin-completion.zsh
-
-then source it from ~/.zshrc, after compinit has run (oh-my-zsh sources .zshrc
-after its own compinit):
-
-  source ~/.ccbunshin-completion.zsh
-
-Sourcing registers both completions and works from any path. Putting the file
-on fpath instead - a directory already on it, such as
-/opt/homebrew/share/zsh/site-functions, or one added with fpath=(...) before
-compinit - covers ccbunshin only: compinit reads the file's #compdef line and
-never runs the rest, so the claude completion stays unregistered.
+  bash  $BASH_COMPLETION_USER_DIR/completions, default
+        ~/.local/share/bash-completion/completions, or the system one
+        (/usr/share/bash-completion/completions on Debian/Ubuntu,
+        /opt/homebrew/share/bash-completion/completions on macOS with the
+        bash-completion package installed). The file must be named
+        ccbunshin.bash: that loader reads <command>.bash and ignores other
+        names, and it reads nothing there until it has been sourced itself.
+  zsh   any directory already on $fpath - check with "print -l $fpath". A file
+        there called _ccbunshin completes ccbunshin, but not claude: compinit
+        reads only the file's leading #compdef line and never runs the rest, so
+        the wrapper's completion needs the source line above.
 
 The commands offered come from the CLI and the profiles from "ccbunshin list",
 so neither list goes stale.
