@@ -140,7 +140,8 @@ Sourcing registers both completions and works from any path. A file on `fpath`
 instead - in a directory already on it such as
 `/opt/homebrew/share/zsh/site-functions`, or one added before `compinit` - covers
 `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the
-rest, so the `claude` completion stays unregistered.
+rest, so the `claude` completion stays unregistered. The source line is needed
+either way, which is why the path above is a plain dotfile.
 
 Profile names are read from `ccbunshin list` at completion time, so profiles
 created later complete without regenerating the script.

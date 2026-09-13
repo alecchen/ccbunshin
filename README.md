@@ -199,7 +199,7 @@ ccbunshin completion zsh > ~/.ccbunshin-completion.zsh
 source ~/.ccbunshin-completion.zsh
 ```
 
-Sourcing registers both completions and works from any path. zsh does have directories that are already on `fpath` (`/usr/share/zsh/5.9/functions`, `/usr/local/share/zsh/site-functions`, `/opt/homebrew/share/zsh/site-functions` on Homebrew), and dropping the file in one with the name `_ccbunshin` needs no rc line - but it covers `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the rest, so the `claude` completion stays unregistered. Either way, re-running the script replaces the definitions rather than nesting them.
+Sourcing registers both completions and works from any path. zsh has directories that are already on `fpath` (`/usr/share/zsh/site-functions`, `/opt/homebrew/share/zsh/site-functions` on Homebrew, `~/.oh-my-zsh/custom/completions` under oh-my-zsh), and a file named `_ccbunshin` in one of those needs no `source` line for the CLI completion - but it covers `ccbunshin` only: `compinit` reads the file's `#compdef` line and never runs the rest, so the `claude` completion stays unregistered. Since the `source` line is needed either way, the file's location is a matter of taste; the single dotfile above keeps bash and zsh symmetric.
 
 At the prompt: subcommands complete for `ccbunshin`, `init` offers its shells, `proxy` its subcommands, and the profile-taking commands (`launch`, `model`, `status`, `doctor`, `delete`, `local`, `global`) offer the profiles that exist at that moment - the list comes from `ccbunshin list`, so a profile created later completes without regenerating the script. Inside a project, `claude` completes Claude Code's common options.
 
