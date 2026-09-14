@@ -107,6 +107,21 @@ sh tests/publish-scan-test.sh   # the above, against temp-file fixtures
 sh tests/release-notes.sh       # release body for $GITHUB_REF_NAME; edits no state
 ```
 
+## Commit messages
+
+Conventional Commits (`type(scope): summary`) apply in this repo from `v0.1.6` onward. It is a
+preference, not a correctness requirement: nothing here parses the prefix, and the flat-list
+release body does not care either way. The form is what the surrounding ecosystem uses, and it
+makes a future `fix:`/`feat:` split possible without rewriting history.
+
+The opt-in marker is `commit.convention=conventional` in `.git/config` (local, untracked), so a
+`commit-msg` hook can enforce it here and stay inert in every other repo. Unset means match the
+repo's existing log style rather than imposing one.
+
+Only from the switch forward. The 56 commits before it are prose subjects and stay that way -
+do not rewrite history. Note that git-cliff's default config sets `filter_unconventional = true`,
+so a grouped changelog would drop those older subjects rather than group them.
+
 ## Build identity
 
 `version` (ldflags `-X main.version=<tag>`) holds a **release tag only**. `updateCLI`

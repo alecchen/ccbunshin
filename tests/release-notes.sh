@@ -31,7 +31,13 @@ else
 fi
 
 # --no-merges: a merge commit's subject restates the branch it brought in.
-# Empty subjects would otherwise emit a bare "- ", which is worse than no line.
-git log --no-merges --pretty='- %s' "$range" | grep -v '^- *$' || true
+# The prefix strip keeps the body prose: a repo writing Conventional Commits
+# should publish "- report the pid", not "- fix: report the pid". Only the
+# known types are stripped, so a prose subject like "Proxy: stop the daemon"
+# survives - the same type list the commit-msg hook enforces, and the reason
+# the older prose-era commits come through unchanged.
+git log --no-merges --pretty='%s' "$range" \
+  | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: //' \
+  | awk 'NF {print "- " $0}' || true
 
 printf '\n%s\n' "$changelog"
