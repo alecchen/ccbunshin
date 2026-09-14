@@ -97,6 +97,15 @@ jobs:
     # identity, so that would leave the release unapprovable.
     environment: release
     steps:
+      # Full history and tags: release-notes.sh resolves the previous tag with
+      # `git describe`, which the default shallow, tagless clone cannot do.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The bullet list, then the compare link. Written to a file rather than
+      # passed inline because the body is multi-line.
+      - name: Generate release notes
+        run: sh tests/release-notes.sh > RELEASE_NOTES.md
       - uses: actions/download-artifact@v8
         with:
           pattern: ccbunshin-*
@@ -104,5 +113,8 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          # Deliberately not generate_release_notes: that builds its list from
+          # merged pull requests, and this repo commits to main directly, so it
+          # would add nothing but a second copy of the compare link.
+          body_path: RELEASE_NOTES.md
           files: dist/*
