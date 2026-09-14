@@ -1,8 +1,9 @@
 #!/bin/sh
 # Regression matrix for the publish-gate PreToolUse hook classifier.
 #
-# Feeds synthetic payloads to the hook and asserts whether it asks. No git or gh
-# command is ever executed, so this publishes nothing and triggers no prompt.
+# Feeds synthetic payloads to the hook and asserts the decision that comes back.
+# No git or gh command is ever executed, so this publishes nothing and triggers
+# no prompt.
 #
 # Run this after ANY edit to ~/.claude/hooks/publish-gate.sh. A hook that matches
 # nothing looks exactly like a hook that is not loaded, so the matrix is the only
@@ -17,6 +18,9 @@ case "$hook" in
   */*) : ;;
   *) hook="./$hook" ;;
 esac
+# Absolute, because the jq-less case below replaces PATH and still has to exec it.
+hook_dir=$(cd "$(dirname "$hook")" && pwd)
+hook=$hook_dir/$(basename "$hook")
 [ -x "$hook" ] || { echo "not executable: $hook" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 2; }
 
@@ -37,6 +41,55 @@ check() {
     fail=$((fail + 1))
     printf 'FAIL [want %s, got %s] %s\n' "$want" "$got" "$cmd"
   fi
+}
+
+# The decision is read out of the JSON rather than inferred from "did it print
+# anything", so ask and deny are distinguishable. Malformed output is a failure,
+# not a crash: the hook returning unparseable JSON means Claude Code ignores it,
+# which is the silent-allow failure this whole file exists to catch.
+# want=allow means "no output at all".
+check_payload() {
+  want=$1
+  payload=$2
+  label=$3
+  out=$(printf '%s' "$payload" | "$hook" || true)
+  if [ -z "$out" ]; then
+    got=allow
+  else
+    got=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "MALFORMED"' 2>/dev/null || echo MALFORMED)
+  fi
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL [want %s, got %s] %s\n' "$want" "$got" "$label"
+  fi
+}
+
+# permission_mode is a top-level field of the PreToolUse payload. The live value
+# observed on this machine is "auto", which is not one of the five the docs list,
+# so the vocabulary is open: the hook must treat exactly two values as
+# no-human-present and everything else - known, unknown, or absent - as a prompt.
+check_mode() {
+  want=$1
+  mode=$2
+  cmd=$3
+  payload=$(jq -nc --arg c "$cmd" --arg m "$mode" '{permission_mode:$m,tool_input:{command:$c}}')
+  check_payload "$want" "$payload" "mode=$mode $cmd"
+}
+
+# The denials have to name the mode, or the reason Claude gets back reads as an
+# unexplained block.
+check_deny_names_mode() {
+  mode=$1
+  cmd=$2
+  payload=$(jq -nc --arg c "$cmd" --arg m "$mode" '{permission_mode:$m,tool_input:{command:$c}}')
+  out=$(printf '%s' "$payload" | "$hook" || true)
+  reason=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null || echo "")
+  case "$reason" in
+    *permission_mode=\'$mode\'*) pass=$((pass + 1)) ;;
+    *) fail=$((fail + 1)); printf 'FAIL [deny reason omits mode=%s] %s\n' "$mode" "$reason" ;;
+  esac
 }
 
 # The MCP shell tool's payload is flat: tool_input is {"command": "..."}, the
@@ -157,6 +210,79 @@ check allow 'gh api my-F-org'
 check allow 'echo "git push"'
 check allow 'igit push'
 check allow 'git pushover'
+
+# --- permission_mode: ask escalates to deny where nobody can answer -------
+# An "ask" in bypassPermissions or dontAsk is a silent no-op: the first skips the
+# prompt, the second answers it without asking. Both would let the publish
+# through with no approval, so the hook must block instead. The classifier is
+# untouched by the mode - only the decision changes - which is what the plain
+# push / --no-verify pair below and the negative controls after it assert.
+check_mode ask   default           'git push'
+check_mode ask   plan              'git push'
+check_mode ask   acceptEdits       'git push'
+check_mode deny  bypassPermissions 'git push'
+check_mode deny  dontAsk           'git push'
+check_mode ask   default           'git push --no-verify'
+check_mode ask   plan              'git push --no-verify'
+check_mode ask   acceptEdits       'git push --no-verify'
+check_mode deny  bypassPermissions 'git push --no-verify'
+check_mode deny  dontAsk           'git push --no-verify'
+check_deny_names_mode bypassPermissions 'git push'
+check_deny_names_mode dontAsk 'git push --no-verify'
+# "auto" is the value this machine's PreToolUse payload actually carries, and it
+# is not one of the five names the docs list. It must keep prompting.
+check_mode ask   auto              'git push'
+check_mode ask   auto              'git push --no-verify'
+# Mode is not a classifier input: forms the classifier ignores stay ignored no
+# matter what the mode says, or a bypassPermissions session would prompt on
+# every read-only command.
+check_mode allow bypassPermissions 'git push --dry-run'
+check_mode allow bypassPermissions 'git commit --no-verify'
+check_mode allow bypassPermissions 'git status'
+check_mode allow dontAsk           'git status'
+
+# --- the jq-less path must escalate too -----------------------------------
+# The mode read has a sed fallback alongside the jq one, the same way the
+# command read does. Without it, a machine lacking jq would silently fall back
+# to ask in the two modes this whole block exists to cover. PATH is replaced
+# with a directory of symlinks to the three tools the hook needs, so `command -v
+# jq` fails while sed/awk/cat still work. The payload is built before the
+# subshell, since jq is not reachable inside it.
+no_jq_dir=$(mktemp -d)
+trap 'rm -rf "$no_jq_dir"' EXIT
+# Enumerated by hand from the hook's own tool use. If the hook grows a new
+# dependency this list goes stale and these cases fail loudly, which is the
+# intended direction - a silent pass here would be the gate quietly not running.
+for tool in sed awk cat tail; do
+  tool_path=$(command -v "$tool")
+  ln -s "$tool_path" "$no_jq_dir/$tool"
+done
+
+check_no_jq() {
+  want=$1
+  mode=$2
+  cmd=$3
+  payload=$(jq -nc --arg c "$cmd" --arg m "$mode" '{permission_mode:$m,tool_input:{command:$c}}')
+  # Exec the hook itself: its #!/bin/sh shebang is an absolute path and so
+  # survives the emptied PATH, while `sh` would not be findable.
+  out=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" HOME="$HOME" "$hook" || true)
+  if [ -z "$out" ]; then
+    got=allow
+  else
+    # jq is unreachable here too, so read the decision with a pattern.
+    got=$(printf '%s' "$out" | sed -n 's/.*"permissionDecision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    [ -n "$got" ] || got=MALFORMED
+  fi
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL [want %s, got %s] no-jq mode=%s %s\n' "$want" "$got" "$mode" "$cmd"
+  fi
+}
+check_no_jq deny bypassPermissions 'git push'
+check_no_jq ask  default           'git push'
+check_no_jq allow bypassPermissions 'git push --dry-run'
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

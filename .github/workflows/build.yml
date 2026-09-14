@@ -12,6 +12,23 @@ permissions:
   contents: write
 
 jobs:
+  # Layer 5 of the publish-gating harness (docs/HARNESS_PUBLISH_GATING.md): the
+  # PreToolUse hook only sees the command Claude Code runs, so `bash deploy.sh`
+  # is invisible to it. This scans tracked scripts for a publish command written
+  # literally into one, which is the static half of that gap. It is a separate
+  # job so it can be made a required status check, and it is deliberately not a
+  # replacement for the `release` job's required-reviewer environment below -
+  # that one is server-side and survives everything this scan cannot see.
+  publish-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The scan first, so a real offender fails with the scanner's own
+      # file:line message rather than a test assertion. Then the scanner's
+      # regression tests, which are what catch the scanner itself going blind.
+      - run: sh tests/publish-scan.sh
+      - run: sh tests/publish-scan-test.sh
+
   test:
     runs-on: ubuntu-latest
     defaults:

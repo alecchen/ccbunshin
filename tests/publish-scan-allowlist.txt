@@ -1,0 +1,18 @@
+# Files tests/publish-scan.sh must not flag, one repo-relative path per line.
+# Blank lines and # comments are ignored.
+#
+# Every entry is a deliberate decision that this file may mention a publish
+# command without publishing. Keep it short; adding a line here is reviewed
+# like any other change, which is the point of keeping it in version control
+# rather than as an exception list inside the workflow YAML.
+
+# Match targets, not commands it runs: the matrix asserts what the hook does
+# with `git push`-shaped input, and never executes it.
+tests/publish-gate-matrix.sh
+
+# The scanner's own test file. Its fixtures ARE publish commands - that is the
+# thing under test - and they are written to a temp dir, never run. Listed here
+# rather than left to pass by accident: its fixtures happen to be quoted today,
+# so quote-stripping hides them, and an unquoted fixture added later would fail
+# CI for a reason that has nothing to do with what the test is checking.
+tests/publish-scan-test.sh

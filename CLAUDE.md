@@ -48,7 +48,8 @@ scripts; `install.sh` and `.github/workflows/build.yml` the release path. There 
   against the live tables before trusting a model id.
 - `docs/HARNESS_PUBLISH_GATING.md` - harness engineering, not ccbunshin behavior: how to stop an
   agent pushing, tagging, or publishing a release without approval. Covers `permissions.ask`, the
-  `PreToolUse` publish-gate hook, and the required-reviewer GitHub environment, with what each layer
+  `PreToolUse` publish-gate hook (including its `permission_mode` escalation to `deny`), the CI
+  script-indirection scan, and the required-reviewer GitHub environment, with what each layer
   catches and what it misses. Read before changing publishing/release setup, and before trusting any
   claim that a gate "covers all git push operations".
 - `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
@@ -99,6 +100,8 @@ sh tests/shell-integration.sh   # project-aware claude wrapper across bash, zsh,
 sh tests/completion-test.sh     # completion scripts, for bash and for zsh's two activation paths
 sh tests/install-test.sh        # installer defaults to the latest GitHub release
 sh tests/publish-gate-matrix.sh # publish-gate hook classifier; needs jq, edits no state
+sh tests/publish-scan.sh        # CI script scan; no publish commands in tracked scripts
+sh tests/publish-scan-test.sh   # the above, against temp-file fixtures
 ```
 
 ## Build identity
