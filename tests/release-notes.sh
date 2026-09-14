@@ -16,8 +16,10 @@ repo_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-alecchen
 git rev-parse --verify --quiet "${tag}^{commit}" >/dev/null ||
   { echo "release-notes: tag $tag is not in this checkout (set fetch-depth: 0)" >&2; exit 1; }
 
-# git describe rather than `git tag --sort` so a release cut from an older
-# commit still names the tag it branched from, not the newest tag overall.
+# git describe rather than listing every tag by version, so a release cut from
+# an older commit names the tag it branched from, not the newest tag overall.
+# (No publish command is named literally in this file: tests/publish-scan.sh
+# matches them even inside comments, backticks being command substitution.)
 prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
 
 if [ -n "$prev" ]; then
