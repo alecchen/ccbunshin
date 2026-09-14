@@ -98,6 +98,7 @@ go -C cmd/ccbunshin test ./...
 sh tests/shell-integration.sh   # project-aware claude wrapper across bash, zsh, tcsh
 sh tests/completion-test.sh     # completion scripts, for bash and for zsh's two activation paths
 sh tests/install-test.sh        # installer defaults to the latest GitHub release
+sh tests/publish-gate-matrix.sh # publish-gate hook classifier; needs jq, edits no state
 ```
 
 ## Build identity
