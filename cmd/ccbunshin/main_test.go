@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -261,6 +262,179 @@ func TestPassThroughUpstreamErrorIsLogged(t *testing.T) {
 	}
 	logged := buffer.String()
 	for _, want := range []string{"ERROR proxy: opus -> opus", "provider=provider1", "status=500"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log %q is missing %q", logged, want)
+		}
+	}
+}
+
+// A caller that hangs up is not a proxy fault and not an upstream fault, so the line it
+// produces must be a warning that says so. Twenty of these once read as errors and buried
+// the ten that were real.
+func TestClientAbortIsWarnedAndLabelled(t *testing.T) {
+	buffer := capturer(t, levelWarn)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"opus"}`))
+	request = request.WithContext(ctx)
+
+	if level := upstreamFailureLevel(context.Canceled, request); level != levelWarn {
+		t.Errorf("a canceled context logged at %v, want WARN", level)
+	}
+	if !strings.Contains(clientAbortNote(request), "client aborted") {
+		t.Errorf("note %q does not say the client aborted", clientAbortNote(request))
+	}
+
+	// The negative case matters as much: a real fault must stay an error.
+	live := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+	if level := upstreamFailureLevel(errors.New("connection refused"), live); level != levelError {
+		t.Errorf("a genuine fault logged at %v, want ERROR", level)
+	}
+	if note := clientAbortNote(live); note != "" {
+		t.Errorf("a live request was labelled %q", note)
+	}
+	if buffer.String() != "" {
+		t.Logf("captured %q", buffer.String())
+	}
+}
+
+// A provider timeout is the proxy's own 5m budget expiring, not the caller hanging up,
+// so it must not be demoted just because it mentions a deadline.
+func TestProviderTimeoutStaysAnError(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+	deadline := fmt.Errorf("Post %q: %w", "https://gw.example.invalid/v1", context.DeadlineExceeded)
+	if level := upstreamFailureLevel(deadline, request); level != levelError {
+		t.Errorf("a provider timeout logged at %v, want ERROR", level)
+	}
+}
+
+// Every failure line carries the request's shape so a reader can tell a buffered request
+// from a stream without cross-referencing anything.
+func TestDiagnosticSuffixCarriesRequestShape(t *testing.T) {
+	upstream, err := url.Parse("https://gw.example.invalid/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := requestPlan{
+		dialect:      dialectOpenAIChat,
+		providerName: "commandcode",
+		provider:     loadedProvider{upstream: upstream},
+		isStreaming:  true,
+		requestBytes: 4096,
+	}
+	suffix := plan.diagnosticSuffix()
+	for _, want := range []string{"provider=commandcode", "dialect=openai-chat", "shape=stream", "request=4096B", "upstream=https://gw.example.invalid/v1"} {
+		if !strings.Contains(suffix, want) {
+			t.Errorf("suffix %q is missing %q", suffix, want)
+		}
+	}
+}
+
+// The failure lines name the upstream, so a credential in that URL must be redacted there
+// too, not only in the summary line.
+func TestDiagnosticSuffixRedactsCredentials(t *testing.T) {
+	upstream, err := url.Parse("https://user:sekret@gw.example.invalid/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := requestPlan{provider: loadedProvider{upstream: upstream}}
+	if suffix := plan.diagnosticSuffix(); strings.Contains(suffix, "sekret") {
+		t.Fatalf("credential leaked into the diagnostic suffix: %s", suffix)
+	}
+}
+
+// The summary line carries the tag so a failure line above it can be tied to the request
+// that produced it.
+func TestRequestLogLineCarriesRequestID(t *testing.T) {
+	line := requestLogLine(requestPlan{requestID: "abc123", requestedModel: "m", targetModel: "m"}, http.StatusOK, 1, time.Second)
+	if !strings.Contains(line, "req=abc123") {
+		t.Errorf("line %q is missing the request tag", line)
+	}
+}
+
+// The default timeout has to clear a slow but healthy stream: the observed
+// ninety-ninth-percentile request took 38s and the slowest 58s, so a 60s budget
+// truncated real work.
+func TestDefaultProviderTimeoutClearsSlowStreams(t *testing.T) {
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "proxy.json")
+	config := `{"port":3456,"providers":{"p":{"upstream":"https://gw.example.invalid/v1"}},"routes":[{"pattern":"m","provider":"p"}]}`
+	if err := os.WriteFile(filename, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeout := cfg.providers["p"].timeout
+	if timeout != 5*time.Minute {
+		t.Errorf("default timeout = %s, want 5m", timeout)
+	}
+	if timeout <= 60*time.Second {
+		t.Errorf("default timeout %s does not clear the observed 58s slowest request", timeout)
+	}
+}
+
+// The helper tests above prove the classification; this proves the wiring, driving a real
+// canceled request through ServeHTTP and reading the log it produced.
+func TestCanceledRequestLogsAsWarnThroughServeHTTP(t *testing.T) {
+	buffer := capturer(t, levelWarn)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": openAITestProvider(t, upstream, nil)},
+			routes:    []loadedRoute{{pattern: "opus", provider: "p"}},
+		},
+		client: upstream.Client(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"opus"}`))
+	request = request.WithContext(ctx)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	logged := buffer.String()
+	if !strings.Contains(logged, "WARN") {
+		t.Errorf("log %q has no warning line", logged)
+	}
+	if !strings.Contains(logged, "client aborted") {
+		t.Errorf("log %q does not name the client abort", logged)
+	}
+	if strings.Contains(logged, "ERROR") {
+		t.Errorf("log %q still reports the cancellation as an error", logged)
+	}
+}
+
+// An upstream that answers 200 and then sends a malformed body is a real fault in the
+// translation layer's input, so it stays an error and is dumped for debugging.
+func TestUntranslatableUpstreamBodyIsLoggedAndDumped(t *testing.T) {
+	buffer := capturer(t, levelError)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "this is not json")
+	}))
+	defer upstream.Close()
+
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": openAITestProvider(t, upstream, nil)},
+			routes:    []loadedRoute{{pattern: "opus", provider: "p"}},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"opus"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	logged := buffer.String()
+	if !strings.Contains(logged, "cannot translate response") {
+		t.Fatalf("log %q does not report the translation failure", logged)
+	}
+	for _, want := range []string{"ERROR", "provider=p", "dialect=openai-chat", "shape=buffered"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("log %q is missing %q", logged, want)
 		}

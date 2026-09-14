@@ -96,7 +96,7 @@ func loadConfig(filename string) (loadedConfig, error) {
 		if err != nil || upstream.Scheme == "" || upstream.Host == "" {
 			return loadedConfig{}, fmt.Errorf("provider %q upstream must be an absolute URL", name)
 		}
-		timeout := 60 * time.Second
+		timeout := 5 * time.Minute
 		if value.Timeout != "" {
 			timeout, err = time.ParseDuration(value.Timeout)
 			if err != nil || timeout <= 0 {
@@ -238,17 +238,23 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	model, err := requestModel(body)
 	if err != nil {
-		logf(levelWarn, "proxy: %s %s from %s failed: %s", r.Method, r.URL.RequestURI(), r.RemoteAddr, err)
+		logf(levelWarn, "proxy: %s %s from %s request_bytes=%dB failed: %s", r.Method, r.URL.RequestURI(), r.RemoteAddr, len(body), err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	plan, ok := p.config.planFor(model)
 	if !ok {
-		logf(levelWarn, "proxy: %s %s from %s failed: no provider route for model %s", r.Method, r.URL.RequestURI(), r.RemoteAddr, model)
+		routes := make([]string, 0, len(p.config.routes))
+		for _, item := range p.config.routes {
+			routes = append(routes, item.pattern)
+		}
+		logf(levelWarn, "proxy: %s %s from %s request_bytes=%dB failed: no provider route for model %s (configured patterns: %s)", r.Method, r.URL.RequestURI(), r.RemoteAddr, len(body), model, strings.Join(routes, ", "))
 		http.Error(w, "no provider route for model", http.StatusBadRequest)
 		return
 	}
-	logf(levelDebug, "proxy: %s %s model=%s routes to provider=%s dialect=%s", r.Method, r.URL.RequestURI(), model, plan.providerName, plan.dialect)
+	plan.requestBytes = len(body)
+	plan.requestID = randomHex(4)
+	logf(levelDebug, "proxy: %s %s model=%s routes to provider=%s dialect=%s req=%s request_bytes=%dB from=%s", r.Method, r.URL.RequestURI(), model, plan.providerName, plan.dialect, plan.requestID, plan.requestBytes, r.RemoteAddr)
 	if r.URL.Path == "/v1/messages/count_tokens" && plan.dialect == dialectOpenAIChat {
 		p.serveCountTokens(w, body, plan)
 		return
@@ -377,7 +383,7 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 	request.Header.Del("Host")
 	response, err := client.Do(request)
 	if err != nil {
-		logf(levelError, "proxy: %s -> %s failed after %s: %s", plan.requestedModel, target.Redacted(), time.Since(started).Round(time.Millisecond), err)
+		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed after %s%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), clientAbortNote(r), err)
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		return
 	}
@@ -385,10 +391,16 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	counter := &countingWriter{writer: w}
+	var copyErr error
 	if flusher := flushWriter(w); flusher != nil {
-		_, _ = io.Copy(flushingWriter{counter, flusher}, response.Body)
+		_, copyErr = io.Copy(flushingWriter{counter, flusher}, response.Body)
 	} else {
-		_, _ = io.Copy(counter, response.Body)
+		_, copyErr = io.Copy(counter, response.Body)
+	}
+	if copyErr != nil {
+		// The status is already the upstream's, so a pass-through stream that died
+		// mid-body is otherwise invisible: it shows up only as a short bytes= count.
+		logfContext(plan, upstreamFailureLevel(copyErr, r), "proxy: %s -> %s req=%s pass-through copy failed after %s with %d bytes delivered%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), counter.bytes, clientAbortNote(r), copyErr)
 	}
 	p.logRequest(plan, response.StatusCode, counter.bytes, started)
 }
@@ -405,6 +417,26 @@ func (p *proxy) logRequest(plan requestPlan, status int, bytes int64, started ti
 	logf(level, "%s", requestLogLine(plan, status, bytes, time.Since(started)))
 }
 
+// clientAbortNote marks a failure the caller caused by hanging up. Without it the same
+// "context canceled" reads as a proxy fault, which is how twenty ordinary client
+// cancellations came to look like errors.
+func clientAbortNote(r *http.Request) string {
+	if errors.Is(r.Context().Err(), context.Canceled) {
+		return " [client aborted: the calling client closed the connection, so this is not a proxy or upstream fault]"
+	}
+	return ""
+}
+
+// upstreamFailureLevel demotes a client abort to a warning and leaves everything else at
+// error, so CCBUNSHIN_LOG=error still surfaces genuine faults. A provider timeout only
+// counts as the client's doing when the caller's own context is what expired.
+func upstreamFailureLevel(err error, r *http.Request) logLevel {
+	if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+		return levelWarn
+	}
+	return levelError
+}
+
 // serveOpenAIChat translates an Anthropic messages request onto an upstream
 // chat-completions call, then translates the response back. The upstream's own headers
 // are deliberately not copied: the body no longer matches the encoding or length it
@@ -418,6 +450,7 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 		return
 	}
 	logf(levelDebug, "proxy: translated request for %s -> %s is %d bytes of openai-chat", plan.requestedModel, plan.targetModel, len(translated))
+	dumpTranslatedRequest(plan, translated)
 	target := *plan.provider.upstream
 	target.Path = strings.TrimRight(target.Path, "/") + "/chat/completions"
 	// The inbound query belongs to the Anthropic endpoint (?beta=true); it means
@@ -432,7 +465,7 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	applyOpenAIChatHeaders(request.Header, r.Header)
 	response, err := client.Do(request)
 	if err != nil {
-		logf(levelError, "proxy: %s -> %s failed after %s: %s", plan.requestedModel, target.Redacted(), time.Since(started).Round(time.Millisecond), err)
+		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed after %s%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), clientAbortNote(r), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "upstream unavailable")
 		return
 	}
@@ -447,13 +480,14 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	}
 	upstreamBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		logf(levelError, "proxy: %s -> %s failed: cannot read upstream response: %s", plan.requestedModel, target.Redacted(), err)
+		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed: cannot read upstream response%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, clientAbortNote(r), err)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to read upstream response")
 		return
 	}
 	out, err := translateOpenAIResponse(upstreamBody, plan.requestedModel)
 	if err != nil {
-		logf(levelError, "proxy: %s -> %s failed: cannot translate response (%d upstream bytes): %s", plan.requestedModel, target.Redacted(), len(upstreamBody), err)
+		logfContext(plan, levelError, "proxy: %s -> %s req=%s failed: cannot translate response (%d upstream bytes): %s", plan.requestedModel, target.Redacted(), plan.requestID, len(upstreamBody), err)
+		dumpUpstreamResponse(plan, response.StatusCode, response.Header, upstreamBody)
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
@@ -474,7 +508,7 @@ func (p *proxy) serveTranslatedStream(w http.ResponseWriter, response *http.Resp
 	if err := translator.run(response.Body); err != nil {
 		// The status was already delivered as a success, so this is the only record
 		// that the caller's stream was cut short.
-		logf(levelError, "proxy: %s -> %s stream failed after %s: %s", plan.requestedModel, plan.targetModel, time.Since(started).Round(time.Millisecond), err)
+		logfContext(plan, levelError, "proxy: %s -> %s req=%s stream failed after %s with %d bytes already delivered to the client: %s", plan.requestedModel, plan.targetModel, plan.requestID, time.Since(started).Round(time.Millisecond), counter.bytes, err)
 		translator.emitError(err.Error())
 	}
 	p.logRequest(plan, response.StatusCode, counter.bytes, started)
@@ -485,7 +519,9 @@ func (p *proxy) serveTranslatedStream(w http.ResponseWriter, response *http.Resp
 // misread. Keeping the upstream's message is what makes a wrong dialect mapping legible.
 func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Response, plan requestPlan, started time.Time) {
 	message := ""
-	if raw, err := io.ReadAll(io.LimitReader(response.Body, 64*1024)); err == nil {
+	var raw []byte
+	if body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024)); err == nil {
+		raw = body
 		var parsed struct {
 			Error struct {
 				Message string `json:"message"`
@@ -505,8 +541,8 @@ func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Respo
 	if message == "" {
 		message = http.StatusText(response.StatusCode)
 	}
-	logf(levelError, "proxy: %s -> %s upstream rejected the request with %d after %s: %s",
-		plan.requestedModel, plan.targetModel, response.StatusCode, time.Since(started).Round(time.Millisecond), message)
+	logfContext(plan, levelError, "proxy: %s -> %s req=%s upstream rejected the request with %d after %s: %s", plan.requestedModel, plan.targetModel, plan.requestID, response.StatusCode, time.Since(started).Round(time.Millisecond), message)
+	dumpUpstreamResponse(plan, response.StatusCode, response.Header, raw)
 	writeTranslatedError(w, response.StatusCode, anthropicErrorTypeForStatus(response.StatusCode), message)
 }
 
@@ -583,9 +619,29 @@ func requestLogLine(plan requestPlan, status int, bytes int64, elapsed time.Dura
 	if plan.isStreaming {
 		shape = "stream"
 	}
-	return fmt.Sprintf("proxy: %s -> %s (%s) provider=%s dialect=%s status=%d bytes=%d elapsed=%s",
-		plan.requestedModel, plan.targetModel, shape, plan.providerName, plan.dialect,
+	return fmt.Sprintf("proxy: %s -> %s (%s) req=%s provider=%s dialect=%s status=%d bytes=%d elapsed=%s",
+		plan.requestedModel, plan.targetModel, shape, plan.requestID, plan.providerName, plan.dialect,
 		status, bytes, elapsed.Round(time.Millisecond))
+}
+
+// dumpTranslatedRequest writes the outgoing openai-chat body at debug level. It is the
+// only way to see what the proxy actually sent when an upstream rejects a translated
+// request, and it is debug-only because the body carries the caller's conversation.
+func dumpTranslatedRequest(plan requestPlan, translated []byte) {
+	logf(levelDebug, "proxy: %s -> %s req=%s translated request follows (%d bytes)",
+		plan.requestedModel, plan.targetModel, plan.requestID, len(translated))
+	logf(levelDebug, "proxy: %s -> %s req=%s request_body=%s", plan.requestedModel, plan.targetModel, plan.requestID, translated)
+}
+
+// dumpUpstreamResponse writes what an upstream actually returned for a request the proxy
+// could not use. The error paths consume the body to build their message, so this is
+// called from a copy of it.
+func dumpUpstreamResponse(plan requestPlan, status int, header http.Header, body []byte) {
+	if len(body) == 0 && len(header) == 0 {
+		return
+	}
+	logf(levelDebug, "proxy: %s -> %s req=%s upstream_response status=%d headers=%v body=%s",
+		plan.requestedModel, plan.targetModel, plan.requestID, status, header, body)
 }
 
 func copyHeaders(dst, src http.Header) {

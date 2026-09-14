@@ -56,6 +56,8 @@ type requestPlan struct {
 	isStreaming    bool
 	inputTokens    int    // local estimate, surfaced before the upstream reports usage
 	effortDefault  string // reasoning_effort applied when the caller sent none; "" for none
+	requestBytes   int    // size of the request body as received; diagnostic only
+	requestID      string // short per-request tag tying the summary line to the failure line
 }
 
 // planFor resolves a request model against the ordered routes, then decides the target

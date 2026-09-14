@@ -227,17 +227,40 @@ nothing.
 Each line carries its level after the timestamp:
 
 ```text
-2026/09/12 23:25:40 INFO proxy: claude-opus-5 -> oss-model (buffered) provider=provider2 dialect=openai-chat status=200 bytes=271 elapsed=1ms
-2026/09/12 23:25:40 WARN proxy: POST /v1/messages from 127.0.0.1:62779 failed: no provider route for model nope
+2026/09/12 23:25:40 INFO proxy: claude-opus-5 -> oss-model (buffered) req=a1b2c3d4 provider=provider2 dialect=openai-chat status=200 bytes=271 elapsed=1ms
+2026/09/12 23:25:40 WARN proxy: POST /v1/messages from 127.0.0.1:62779 request_bytes=42B failed: no provider route for model nope (configured patterns: claude-*)
 ```
 
-- **info** (default): one line per request with the requested and target model, provider, dialect, status, response bytes, and elapsed time, plus one line at startup and one at shutdown.
-- **warn**: requests the proxy itself rejects (no route, unreadable body) and reasoning dropped mid-stream.
+- **info** (default): one line per request with the requested and target model, a short per-request tag (`req=`), provider, dialect, status, response bytes, and elapsed time, plus one line at startup and one at shutdown.
+- **warn**: requests the proxy itself rejects (no route, unreadable body), reasoning dropped mid-stream, and a request the calling client aborted. A cancellation is the client's decision rather than a failure of the proxy or the upstream, so it is reported here with a `[client aborted: ...]` note instead of at `error`; the provider's own timeout expiring still counts as an error.
 - **error**: upstream failures (unreachable, non-2xx, untranslatable response), a stream cut short after its headers were already sent, and any request whose response was 5xx.
-- **debug**: the routing decision and the upstream URL for each request, translated request size, and upstream usage per streamed message, including the cache hit count (`cached=`); this is the level that shows whether prompt caching is hitting.
+
+Every `warn` and `error` line ends with a bracketed diagnostic suffix naming the
+provider, dialect, `buffered`/`stream` shape, request size, and upstream URL:
+
+```text
+2026/09/14 10:45:20 ERROR proxy: claude-opus-5 -> oss-model req=a1b2c3d4 stream failed after 1m0.005s with 1662212 bytes already delivered to the client: context deadline exceeded [provider=commandcode dialect=openai-chat shape=stream request=48731B upstream=https://api.example.invalid/provider/v1]
+```
+
+A stream failure happens after the status is already committed, so the `bytes already
+delivered` count is the only way to tell a stream that died at once from one that died
+after a megabyte. Credentials in the upstream URL are redacted in that suffix.
+
+At `debug`, an upstream that rejects a translated request also dumps what was sent and
+what came back, which is what makes a wrong dialect mapping diagnosable:
+
+```text
+DEBUG proxy: claude-opus-5 -> oss-model req=a1b2c3d4 request_body={...}
+DEBUG proxy: claude-opus-5 -> oss-model req=a1b2c3d4 upstream_response status=400 headers=map[...] body={...}
+```
+
+Those two lines carry the conversation, so they are `debug` only and never written at
+the default level.
+
+- **debug**: the routing decision and the upstream URL for each request, translated request size, and upstream usage per streamed message, including the cache hit count (`cached=`); this is the level that shows whether prompt caching is hitting. It is also the only level that writes a request or response body, and only when a translated request is rejected.
 
 Credentials are never logged: URLs in the log are redacted, and no request or
-response body is written at any level. `debug` is the most verbose setting.
+response body is written below `debug`.
 
 Routes select the provider; `models` rewrites the model ID after routing.
 
@@ -246,7 +269,7 @@ The proxy listens on the configured port, reads the request model, applies the o
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `60s`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none (see below). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none (see below). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
 - `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream), and `effort` (overriding the provider's).
 
 ## Translating providers
@@ -331,7 +354,14 @@ sh tests/install-test.sh
 `main_test.go` covers the log levels directly: `TestParseLogLevel` for
 `CCBUNSHIN_LOG`, and `TestLogThresholdFiltersLines`, `TestRequestLogLineNamesModelProviderAndDialect`,
 `TestRequestLogLineRedactsCredentials`, `TestPassThroughUpstreamErrorIsLogged`,
-and `TestFailedRequestIsLoggedAtErrorLevel` for what each level writes.
+and `TestFailedRequestIsLoggedAtErrorLevel` for what each level writes. The
+severity split and the diagnostic suffix have their own cases:
+`TestClientAbortIsWarnedAndLabelled` and `TestCanceledRequestLogsAsWarnThroughServeHTTP`
+for the abort demotion, `TestProviderTimeoutStaysAnError` for the case that must
+not be demoted, and `TestDiagnosticSuffixCarriesRequestShape`,
+`TestDiagnosticSuffixRedactsCredentials`, and `TestRequestLogLineCarriesRequestID`
+for what the failure lines carry. `TestDefaultProviderTimeoutClearsSlowStreams`
+pins the default timeout.
 End to end, start the proxy with `CCBUNSHIN_LOG=debug`, send one request, and
 read `~/.config/ccbunshin/proxy.log`: a line per request plus the routing and
 usage lines.

@@ -59,3 +59,30 @@ func logf(level logLevel, format string, args ...any) {
 	}
 	log.Printf("%s %s", level, fmt.Sprintf(format, args...))
 }
+
+// logfContext appends the diagnostic suffix to a line. The fields there are structural
+// facts about the request rather than a format string, so the caller does not restate
+// them at every failure site.
+func logfContext(p requestPlan, level logLevel, format string, args ...any) {
+	logf(level, format+p.diagnosticSuffix(), args...)
+}
+
+// diagnosticSuffix renders the fields every failure line carries. A failure inside
+// stream.go has no requestPlan in scope, so it passes one describing what it knows.
+func (p requestPlan) diagnosticSuffix() string {
+	shape := "buffered"
+	if p.isStreaming {
+		shape = "stream"
+	}
+	return fmt.Sprintf(" [provider=%s dialect=%s shape=%s request=%dB upstream=%s]",
+		p.providerName, p.dialect, shape, p.requestBytes, upstreamAddress(p.provider))
+}
+
+// upstreamAddress returns the upstream URL with any credential redacted. The failure
+// lines name the upstream, so this is the one place a password could reach the log.
+func upstreamAddress(p loadedProvider) string {
+	if p.upstream == nil {
+		return "none"
+	}
+	return p.upstream.Redacted()
+}
