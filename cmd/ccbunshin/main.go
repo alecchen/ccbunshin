@@ -2011,14 +2011,15 @@ release build)" for local builds; "ccbunshin --version" works too).
 	case "resolve-provider":
 		return `usage: ccbunshin resolve-provider
 
-Print the nearest .ccbunshin-profile provider for the current directory, or
-nothing outside a project. Used by the bash/zsh wrapper.
+Print the profile for the current directory: the nearest .ccbunshin-profile
+provider, else the global profile from "ccbunshin global", else nothing.
+Used by the bash/zsh wrapper.
 `, true
 	case "run":
 		return `usage: ccbunshin run [claude args...]
 
-Run Claude Code with the nearest project provider, or plain "claude" outside
-a project. Used by the tcsh wrapper.
+Run Claude Code with the nearest project provider, else the global profile,
+else plain "claude". Used by the tcsh wrapper.
 `, true
 	case "help":
 		return `usage: ccbunshin help [<command>]

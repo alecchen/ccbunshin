@@ -4,7 +4,8 @@
 # Builds the real binary, puts a recording fake `claude` stub and the real
 # ccbunshin on PATH, then drives bash, zsh, and tcsh through the wrappers
 # emitted by `ccbunshin init <shell>` and asserts routing, argv forwarding,
-# transparency outside projects, idempotency, and exit-status propagation.
+# transparency outside projects (with and without a global selection),
+# idempotency, and exit-status propagation.
 #
 # Usage: tests/shell-integration.sh
 # Requires: bash, zsh, tcsh, and a Go toolchain.
@@ -139,6 +140,46 @@ claude -p "again"
   echo "ok: $shell alias-shadow"
 }
 
+# The two halves of the no-marker contract: with no global selection the wrapper
+# must stay transparent and run the plain claude binary, and with one set it must
+# route through that profile. Both use $PLAIN, which has no .ccbunshin-profile
+# marker anywhere above it.
+run_global_fallback() {
+  shell=$1
+  case "$shell" in
+    bash) flags='--noprofile --norc -c' ;;
+    zsh)  flags='-f -c' ;;
+    tcsh) flags='-f -c' ;;
+  esac
+  echo "== $shell (global fallback) =="
+  init=$(ccbunshin init "$shell")
+  if [ "$shell" = tcsh ]; then
+    code=$(printf 'eval `ccbunshin init tcsh`\ncd "$PLAIN"\nclaude -p "no global"\n')
+  else
+    code=$(printf '%s\ncd "$PLAIN"\nclaude -p "no global"\n' "$init")
+  fi
+
+  : > "$LOG"
+  rm -f "$CCBUNSHIN_PROFILES_DIR/global"
+  "$shell" $flags "$code" || { echo "FAILED: $shell unset-global scenario exited $?"; return 1; }
+  printf 'argv: [-p] [no global]\n' > "$WORK/expected"
+  if ! diff -u "$WORK/expected" "$LOG"; then
+    echo "FAILED: $shell mishandled a marker-less dir with no global selection"
+    return 1
+  fi
+
+  : > "$LOG"
+  printf 'provider1\n' > "$CCBUNSHIN_PROFILES_DIR/global"
+  "$shell" $flags "$code" || { echo "FAILED: $shell set-global scenario exited $?"; return 1; }
+  printf 'argv: [--settings] [%s] [-p] [no global]\n' "$SET1" > "$WORK/expected"
+  if ! diff -u "$WORK/expected" "$LOG"; then
+    echo "FAILED: $shell ignored the global selection outside a project"
+    return 1
+  fi
+  rm -f "$CCBUNSHIN_PROFILES_DIR/global"
+  echo "ok: $shell global-fallback"
+}
+
 failed=0
 for shell in bash zsh tcsh; do
   if ! command -v "$shell" >/dev/null 2>&1; then
@@ -147,6 +188,7 @@ for shell in bash zsh tcsh; do
   fi
   run_shell "$shell" || failed=1
   run_alias_shadow "$shell" || failed=1
+  run_global_fallback "$shell" || failed=1
 done
 
 [ "$failed" -eq 0 ] || exit 1

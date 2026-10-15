@@ -735,9 +735,11 @@ func TestBuildClaudeCommandForwardsArgs(t *testing.T) {
 	}
 }
 
-// TestResolveProvider pins the no-selection case: with no global profile set,
-// resolveProvider stays "" outside a project, which is what keeps the shell
-// wrapper falling back to the plain claude binary.
+// TestResolveProvider pins the local-then-global order resolveProvider inherits
+// from findProfile: the nearest marker wins wherever one exists, the global
+// selection applies everywhere else, and "" is returned only when neither is
+// set - which is what makes the shell wrapper fall back to the plain claude
+// binary.
 func TestResolveProvider(t *testing.T) {
 	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
 	root := t.TempDir()
@@ -766,12 +768,39 @@ func TestResolveProvider(t *testing.T) {
 		{filepath.Join(proj, "a", "b", "c"), "provider1"},      // deep child
 		{filepath.Join(nested, "nested"), "provider2"},         // nearest wins
 		{filepath.Join(nested, "nested", "deep"), "provider2"}, // inside nested project
-		{filepath.Join(root, "plain"), ""},                     // no profile
+		{filepath.Join(root, "plain"), ""},                     // no marker, no global
 	}
 	for _, tc := range cases {
 		if got := resolveProvider(tc.dir); got != tc.want {
 			t.Errorf("resolveProvider(%s) = %q, want %q", tc.dir, got, tc.want)
 		}
+	}
+}
+
+// TestResolveProviderFallsBackToGlobal pins the half of the wrapper contract
+// that has no marker to find: "outside a project" is not "no profile", so a
+// global selection must still be routed rather than handed to the plain claude
+// binary. The binary reports only whether it resolved a profile, not which
+// source won, which is why the shell wrapper needs no extra state.
+func TestResolveProviderFallsBackToGlobal(t *testing.T) {
+	t.Setenv("CCBUNSHIN_PROFILES_DIR", t.TempDir())
+	if err := setGlobalProfile("paid"); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveProvider(t.TempDir()); got != "paid" {
+		t.Fatalf("resolveProvider outside a project = %q, want the global selection", got)
+	}
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	if err := os.MkdirAll(proj, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localProfilePath(proj), []byte("free\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveProvider(proj); got != "free" {
+		t.Fatalf("resolveProvider in a project = %q, want the marker to win over global", got)
 	}
 }
 
