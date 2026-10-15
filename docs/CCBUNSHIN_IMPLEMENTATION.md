@@ -139,9 +139,10 @@ install: `ccbunshin completion <bash|zsh>` prints the script and the user writes
 their shell already looks, because the two shells disagree about how a completion script is
 loaded (see the implementation notes for the zsh `fpath` caveat).
 
-## 6. Auth - out of scope
+## 6. Auth - per profile, and per provider in the proxy
 
-Claude Code has native credential mechanisms; ccbunshin never reads or writes credentials.
+Claude Code has native credential mechanisms; ccbunshin writes no credential anywhere, and no
+profile needs one to be a credential store.
 Authentication precedence (docs): `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` >
 `apiKeyHelper` script > OAuth. The user configures auth in their own settings - shared in
 `~/.claude/settings.json`, or per-profile by setting the `apiKeyHelper` key (or env vars) in
@@ -220,7 +221,7 @@ The requirements doc describes the custom proxy that maps Claude Code requests t
 ## 11. Non-goals
 
 - **No `CLAUDE_CONFIG_DIR` / symlink management** (v1 design, superseded).
-- **No auth handling** (native Claude Code mechanisms, section 6).
+- **No auth handling in profiles** (native Claude Code mechanisms, section 6). The proxy has one narrow exception: a provider may name an environment variable holding its own token (`auth_token_env`), or ask for no credential (`no_auth`). See decision 15.
 - No LeanCTX integration (separate concern). No GUI.
 
 Phase 1's "no proxy, no binary version management" no longer holds: both are implemented and are

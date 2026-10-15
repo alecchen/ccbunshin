@@ -158,6 +158,7 @@ func applyOpenAIChatHeaders(dst, src http.Header) {
 	} else {
 		dst.Del("Authorization")
 	}
+	dst.Del("X-Api-Key")
 }
 
 // applyTranslatedResponseHeaders replaces the upstream header copy for a translated

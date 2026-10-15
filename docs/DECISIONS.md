@@ -278,3 +278,47 @@ sit in the repo waiting to be run again.
 Sources: [automatically generated release
 notes](https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes),
 [action-gh-release](https://github.com/softprops/action-gh-release).
+
+## 15. A provider may name its own credential, and may ask for none
+
+Decision 4 stays: credentials are the user's, configured through Claude Code's native
+mechanisms, and ccbunshin never stores one. What narrows is "never reads".
+
+A caller has exactly one credential - `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` in the
+profile that launched it - but the route table can send one session to several upstreams. The
+credential that authenticates a hosted gateway is wrong for a local model server, and no
+client-side mechanism can vary it per model: `apiKeyHelper` takes no arguments and is cached for
+five minutes, and `ANTHROPIC_CUSTOM_HEADERS` is fixed for the process. Only the proxy knows the
+provider, because `planFor` resolved it, so the same resolution that picks the base URL picks the
+credential.
+
+Two provider keys, both optional:
+
+- `auth_token_env` names an environment variable the daemon reads per request. The name lives in
+  `proxy.json`; the value never does. Per-request rather than at load, so a rotated token is
+  picked up without a restart.
+- `no_auth` sends no credential at all, for a local server that needs none. This also closes a
+  leak that predates it: without it the caller's token is forwarded to every routed upstream,
+  including one on the LAN.
+
+`applyProviderAuth` runs on both dialect paths, after the inbound headers are copied. The token
+goes into `Authorization: Bearer` and `X-Api-Key` both, because which header an upstream reads is
+not discoverable from its config; that is also what Claude Code does for an `apiKeyHelper` value.
+When the named variable is empty the credential headers are still removed rather than falling back
+to the caller's - the provider asked for its own credential, and sending the wrong one reads as an
+authentication failure instead of a configuration mistake.
+
+**With neither key set the headers are untouched**: a config that says nothing about auth forwards
+the caller's credential byte-for-byte as before. Setting both on one provider is rejected at load.
+
+Rejected: putting the value in `proxy.json` (it would have to be shareable, and
+`examples/proxy.json` is a template meant to be copied); a `header` key choosing between
+`Authorization` and `x-api-key` (the both-headers rule removes the need to know); a secrets file at
+`~/.config/ccbunshin/secrets.json` (a second config surface for the same capability - the daemon
+environment already exists, since `proxyStart` forwards `os.Environ()`, and a secrets file can be
+added later without changing this one). A `token_env_fallback` to the caller's credential was
+rejected for the reason above.
+
+The cost, stated plainly: the daemon reads a credential. It is read from the daemon's own
+environment, which is a shell the user controls, and it is never written back. The systemd unit
+wants `Environment=` or `EnvironmentFile=` for a deployment that uses this.

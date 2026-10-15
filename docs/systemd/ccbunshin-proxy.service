@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/ccbunshin --proxy-server
 Environment=CCBUNSHIN_PROXY_CONFIG=/etc/ccbunshin/proxy.json
+# A provider that sets auth_token_env reads its credential from the daemon's
+# environment. Point this at a 0600 file of KEY=value lines.
+#EnvironmentFile=/etc/ccbunshin/proxy.env
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

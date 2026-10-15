@@ -65,7 +65,7 @@ making it quietly.
 1. Isolation is per-profile `--settings` files, never `CLAUDE_CONFIG_DIR`.
 2. `env` blocks merge per-variable: a variable set only in a lower file survives.
 3. `hooks`, `model`, and `statusLine` isolate per profile; list keys merge and cannot be subtracted.
-4. Auth is out of scope: ccbunshin never reads or writes credentials.
+4. Profiles carry no credentials; the proxy may read a provider's token from a named environment variable, and `no_auth` sends none (see decision 15).
 5. Scope: isolation, local/global profiles, shell wrappers, the proxy, self-update.
 6. The internal switcher's global settings stay untouched.
 7. The project-aware `claude` wrapper is a thin router over the `.ccbunshin-profile` marker.

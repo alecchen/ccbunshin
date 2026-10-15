@@ -269,7 +269,7 @@ The proxy listens on the configured port, reads the request model, applies the o
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none (see below). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below).
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none (see below). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged, `openai-chat` translates it (see below). Optional `auth_token_env` names an environment variable holding this provider's credential, and optional `no_auth` sends none (see below).
 - `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream), and `effort` (overriding the provider's).
 
 ## Translating providers
@@ -324,7 +324,33 @@ This endpoint exists because a client cannot otherwise learn what its model ID b
 
 `/model/info` and `/v1/models` are forwarded unchanged. `/model/info` carries no `model` field, so it cannot be dialect-dispatched or resolved, and a gateway that does not implement it returns its own 404.
 
-Authentication is forwarded, never configured: an inbound `Authorization: Bearer` is passed through, and an inbound `x-api-key` is promoted to `Authorization: Bearer`. No credential is read from or written to `proxy.json`.
+Authentication is forwarded, never configured by default: an inbound `Authorization: Bearer` is passed through, and an inbound `x-api-key` is promoted to `Authorization: Bearer`. No credential value is ever written to `proxy.json`.
+
+A caller has one credential, but the route table can send one session to several upstreams, and the credential that authenticates a hosted gateway is wrong for a local server. Two provider keys resolve that:
+
+- `auth_token_env`: the name of an environment variable holding this provider's credential. The value is read per request, so a rotated token needs no reload, though a variable the daemon did not inherit at startup needs `ccbunshin proxy restart`. The token is sent in both `Authorization: Bearer` and `X-Api-Key`, since which header an upstream reads is not discoverable from its config; this is what Claude Code does for an `apiKeyHelper` value. The variable name goes in `proxy.json`, never the value.
+- `no_auth`: send no credential at all, for a local server that needs none. Without it the caller's token is forwarded to every upstream, including one on the LAN.
+
+Setting both on one provider is rejected at load. With neither set, the caller's credential is forwarded exactly as it always was.
+
+```json
+{
+  "providers": {
+    "gateway": {
+      "upstream": "https://gateway.example.invalid",
+      "dialect": "openai-chat",
+      "default_model": "oss-model",
+      "auth_token_env": "GATEWAY_TOKEN"
+    },
+    "local": {
+      "upstream": "http://127.0.0.1:8080",
+      "no_auth": true
+    }
+  }
+}
+```
+
+The daemon reads the variable from its own environment, which is the shell that ran `ccbunshin proxy start`. Export it there, or add `Environment=` / `EnvironmentFile=` to the systemd unit.
 
 ## systemd
 

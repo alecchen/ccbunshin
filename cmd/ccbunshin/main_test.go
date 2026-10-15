@@ -1769,3 +1769,198 @@ func TestProfileNamesListsJSONOnly(t *testing.T) {
 		t.Errorf("profileNames() on a missing directory = %q, want empty", names)
 	}
 }
+
+// A provider that names an environment variable gets that token instead of the caller's,
+// in both credential headers, because which one an upstream reads is not discoverable.
+func TestApplyProviderAuthUsesConfiguredToken(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_PROVIDER_TOKEN", "provider-secret")
+	header := http.Header{}
+	header.Set("Authorization", "Bearer caller-secret")
+	header.Set("X-Api-Key", "caller-key")
+	applyProviderAuth(header, loadedProvider{authTokenEnv: "CCBUNSHIN_TEST_PROVIDER_TOKEN"})
+	if got := header.Get("Authorization"); got != "Bearer provider-secret" {
+		t.Errorf("Authorization = %q, want the provider's token", got)
+	}
+	if got := header.Get("X-Api-Key"); got != "provider-secret" {
+		t.Errorf("X-Api-Key = %q, want the provider's token", got)
+	}
+}
+
+// With neither key set, the caller's credential is forwarded untouched. This is the
+// behavior every config written before these keys expects, so it must not drift.
+func TestApplyProviderAuthWithoutConfigForwardsCaller(t *testing.T) {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer caller-secret")
+	header.Set("X-Api-Key", "caller-key")
+	applyProviderAuth(header, loadedProvider{})
+	if got := header.Get("Authorization"); got != "Bearer caller-secret" {
+		t.Errorf("Authorization = %q, want the caller's credential untouched", got)
+	}
+	if got := header.Get("X-Api-Key"); got != "caller-key" {
+		t.Errorf("X-Api-Key = %q, want the caller's credential untouched", got)
+	}
+}
+
+// no_auth sends no credential at all: both headers are cleared, so a local server that
+// needs none never receives the caller's cloud token.
+func TestApplyProviderAuthNoAuthStripsCredential(t *testing.T) {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer caller-secret")
+	header.Set("X-Api-Key", "caller-key")
+	applyProviderAuth(header, loadedProvider{noAuth: true})
+	if got := header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want it stripped", got)
+	}
+	if got := header.Get("X-Api-Key"); got != "" {
+		t.Errorf("X-Api-Key = %q, want it stripped", got)
+	}
+}
+
+// An unset variable must not fall back to the caller's credential: the provider asked
+// for its own token, and forwarding the wrong one would read as an auth failure.
+func TestApplyProviderAuthEmptyTokenSendsNone(t *testing.T) {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer caller-secret")
+	header.Set("X-Api-Key", "caller-key")
+	applyProviderAuth(header, loadedProvider{authTokenEnv: "CCBUNSHIN_TEST_UNSET_TOKEN"})
+	if got := header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want no credential", got)
+	}
+	if got := header.Get("X-Api-Key"); got != "" {
+		t.Errorf("X-Api-Key = %q, want no credential", got)
+	}
+}
+
+// The openai-chat path promotes an inbound x-api-key to Bearer, so X-Api-Key must not
+// survive into the upstream request. applyProviderAuth clears it, but a config with no
+// auth block relies on applyOpenAIChatHeaders doing it.
+func TestOpenAIChatDoesNotForwardXAPIKey(t *testing.T) {
+	header := http.Header{}
+	applyOpenAIChatHeaders(header, http.Header{"X-Api-Key": {"sk-test"}})
+	if got := header.Get("X-Api-Key"); got != "" {
+		t.Errorf("X-Api-Key = %q, want it dropped for an openai-chat upstream", got)
+	}
+	if got := header.Get("Authorization"); got != "Bearer sk-test" {
+		t.Errorf("Authorization = %q, want the x-api-key promoted to Bearer", got)
+	}
+}
+
+// End to end through the anthropic path: a provider with no_auth reaches the upstream
+// without the caller's credential.
+func TestProxyNoAuthProviderStripsCallerCredential(t *testing.T) {
+	var seenAuth, seenAPIKey string
+	var seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenAPIKey = r.Header.Get("X-Api-Key")
+		seenPath = r.URL.Path
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	provider := testProvider(t, upstream, nil)
+	provider.noAuth = true
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"local": provider},
+			routes:    []loadedRoute{{pattern: "local-*", provider: "local"}},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", strings.NewReader(`{"model":"local-model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-secret")
+	request.Header.Set("X-Api-Key", "caller-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if seenPath != "/v1/messages" {
+		t.Errorf("path = %q", seenPath)
+	}
+	if seenAuth != "" {
+		t.Errorf("Authorization = %q, want the caller's credential stripped", seenAuth)
+	}
+	if seenAPIKey != "" {
+		t.Errorf("X-Api-Key = %q, want the caller's credential stripped", seenAPIKey)
+	}
+}
+
+// End to end through the openai-chat path: the provider's own token replaces the
+// caller's, which is the case a single-profile token cannot express.
+func TestProxyProviderTokenOverridesCallerOnTranslatedPath(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_PROVIDER_TOKEN", "provider-secret")
+	var seenAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	provider := openAITestProvider(t, upstream, map[string]string{"claude-opus-5": "oss-model"})
+	provider.authTokenEnv = "CCBUNSHIN_TEST_PROVIDER_TOKEN"
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": provider},
+			routes:    []loadedRoute{testRoute("claude-*", "p")},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-secret")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if seenAuth != "Bearer provider-secret" {
+		t.Fatalf("Authorization = %q, want the provider's token to win", seenAuth)
+	}
+}
+
+// A provider that sets both keys is contradictory and rejected at load, where the
+// mistake is one line of config rather than a request-time surprise.
+func TestLoadConfigRejectsAuthTokenEnvWithNoAuth(t *testing.T) {
+	file := writeConfig(t, `{
+	  "port": 3456,
+	  "providers": {
+	    "p": {"upstream": "https://example.invalid", "auth_token_env": "SOME_TOKEN", "no_auth": true}
+	  },
+	  "routes": [{"pattern": "m", "provider": "p"}]
+	}`)
+	if _, err := loadConfig(file); err == nil {
+		t.Fatal("loadConfig accepted auth_token_env together with no_auth")
+	}
+}
+
+// The keys round-trip through the config loader into the loaded provider.
+func TestLoadConfigReadsProviderAuth(t *testing.T) {
+	file := writeConfig(t, `{
+	  "port": 3456,
+	  "providers": {
+	    "cloud": {"upstream": "https://cloud.example.invalid", "auth_token_env": "CLOUD_TOKEN"},
+	    "local": {"upstream": "http://127.0.0.1:8080", "no_auth": true}
+	  },
+	  "routes": [
+	    {"pattern": "cloud-*", "provider": "cloud"},
+	    {"pattern": "local-*", "provider": "local"}
+	  ]
+	}`)
+	cfg, err := loadConfig(file)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if got := cfg.providers["cloud"].authTokenEnv; got != "CLOUD_TOKEN" {
+		t.Errorf("cloud authTokenEnv = %q", got)
+	}
+	if cfg.providers["cloud"].noAuth {
+		t.Error("cloud noAuth = true, want false")
+	}
+	if !cfg.providers["local"].noAuth {
+		t.Error("local noAuth = false, want true")
+	}
+	if got := cfg.providers["local"].authTokenEnv; got != "" {
+		t.Errorf("local authTokenEnv = %q, want empty", got)
+	}
+}

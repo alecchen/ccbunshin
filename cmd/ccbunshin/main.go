@@ -35,6 +35,11 @@ type provider struct {
 	Dialect      string            `json:"dialect,omitempty"`
 	DefaultModel string            `json:"default_model,omitempty"`
 	Effort       string            `json:"effort,omitempty"`
+	// AuthTokenEnv names the environment variable holding this provider's credential;
+	// the value itself never appears here. NoAuth sends no credential at all, for an
+	// upstream that needs none. Setting both is rejected as contradictory.
+	AuthTokenEnv string `json:"auth_token_env,omitempty"`
+	NoAuth       bool   `json:"no_auth,omitempty"`
 }
 type route struct {
 	Pattern       string            `json:"pattern"`
@@ -66,6 +71,11 @@ type loadedProvider struct {
 	defaultModel string
 	configured   bool // whether dialect came from the config rather than the default
 	effort       string
+	// authTokenEnv empty and noAuth false means the caller's own credential is
+	// forwarded unchanged, which is what every config written before these keys
+	// expects. See applyProviderAuth.
+	authTokenEnv string
+	noAuth       bool
 }
 type proxy struct {
 	config loadedConfig
@@ -111,6 +121,9 @@ func loadConfig(filename string) (loadedConfig, error) {
 		if err != nil {
 			return loadedConfig{}, err
 		}
+		if value.NoAuth && value.AuthTokenEnv != "" {
+			return loadedConfig{}, fmt.Errorf("provider %q sets both auth_token_env and no_auth", name)
+		}
 		providers[name] = loadedProvider{
 			upstream:     upstream,
 			timeout:      timeout,
@@ -121,6 +134,10 @@ func loadConfig(filename string) (loadedConfig, error) {
 			// explicit anthropic, which validateDialectTargets needs to reason about.
 			configured: value.Dialect != "",
 			effort:     effort,
+			// The variable is read in applyProviderAuth, once per request, so the
+			// secret stays out of the config and a rotated value needs no reload.
+			authTokenEnv: value.AuthTokenEnv,
+			noAuth:       value.NoAuth,
 		}
 	}
 	seen := map[string]bool{}
@@ -381,6 +398,7 @@ func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []by
 	}
 	copyHeaders(request.Header, r.Header)
 	request.Header.Del("Host")
+	applyProviderAuth(request.Header, provider)
 	response, err := client.Do(request)
 	if err != nil {
 		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed after %s%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), clientAbortNote(r), err)
@@ -463,6 +481,7 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 		return
 	}
 	applyOpenAIChatHeaders(request.Header, r.Header)
+	applyProviderAuth(request.Header, plan.provider)
 	response, err := client.Do(request)
 	if err != nil {
 		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed after %s%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), clientAbortNote(r), err)
@@ -683,6 +702,37 @@ func rewriteModelTo(body []byte, target string) []byte {
 		return body
 	}
 	return result
+}
+
+// applyProviderAuth replaces the caller's credential with the provider's own, when the
+// provider configured one. It runs after the inbound headers are copied, and on both
+// dialect paths, because the caller's credential belongs to whichever provider its own
+// profile named and is wrong for any other.
+//
+// With neither key set the headers are untouched, so a config that says nothing about
+// auth forwards the caller's credential exactly as it always did.
+//
+// The token goes into both Authorization and X-Api-Key: which header an upstream reads is
+// not discoverable from its config, and this is what Claude Code itself does for an
+// apiKeyHelper value. When the named variable is empty the credential headers are still
+// removed - the provider asked for its own credential, and sending the caller's instead
+// would be wrong in a way that looks like an authentication failure.
+func applyProviderAuth(dst http.Header, p loadedProvider) {
+	if p.authTokenEnv == "" && !p.noAuth {
+		return
+	}
+	dst.Del("Authorization")
+	dst.Del("X-Api-Key")
+	if p.noAuth {
+		return
+	}
+	token := os.Getenv(p.authTokenEnv)
+	if token == "" {
+		logf(levelWarn, "proxy: provider auth_token_env %s is empty; sending no credential", p.authTokenEnv)
+		return
+	}
+	dst.Set("Authorization", "Bearer "+token)
+	dst.Set("X-Api-Key", token)
 }
 
 func runServer(ctx context.Context, cfg loadedConfig) error {
