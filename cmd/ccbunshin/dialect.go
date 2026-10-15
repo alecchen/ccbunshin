@@ -207,7 +207,11 @@ type anthropicErrorBody struct {
 
 // writeTranslatedError renders an Anthropic error envelope. It is only usable before a
 // status is committed; once streaming has started, the stream translator owns errors.
-func writeTranslatedError(w http.ResponseWriter, status int, errorType, message string) {
+// retryAfter is the upstream's own Retry-After, forwarded verbatim when it sent one, and
+// empty otherwise: inventing a delay from the status would pass off a guess as the
+// upstream's answer, and the header is only worth forwarding because the upstream knows
+// something the proxy does not.
+func writeTranslatedError(w http.ResponseWriter, status int, errorType, message, retryAfter string) {
 	var body anthropicErrorBody
 	body.Type = "error"
 	body.Error.Type = errorType
@@ -218,6 +222,18 @@ func writeTranslatedError(w http.ResponseWriter, status int, errorType, message 
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(encoded)
+}
+
+// copyRetryAfter reads the upstream's Retry-After. The translated path builds its own
+// response, so the header does not survive on its own the way it does on a pass-through,
+// where copyHeaders already carries it. A client that honours the header backs off for as
+// long as the upstream asked; without it Claude Code falls back on its own near-zero
+// delay, which turns a rate-limited upstream into a retry storm.
+func copyRetryAfter(response *http.Response) string {
+	return strings.TrimSpace(response.Header.Get("Retry-After"))
 }

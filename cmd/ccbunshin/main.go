@@ -446,7 +446,7 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	translated, err := translateAnthropicRequest(body, plan.targetModel, plan.effortDefault)
 	if err != nil {
 		logf(levelWarn, "proxy: %s -> %s failed: cannot translate request: %s", plan.requestedModel, plan.targetModel, err)
-		writeTranslatedError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeTranslatedError(w, http.StatusBadRequest, "invalid_request_error", err.Error(), "")
 		return
 	}
 	logf(levelDebug, "proxy: translated request for %s -> %s is %d bytes of openai-chat", plan.requestedModel, plan.targetModel, len(translated))
@@ -459,14 +459,14 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target.String(), bytes.NewReader(translated))
 	if err != nil {
 		logf(levelError, "proxy: %s -> %s failed: cannot build upstream request: %s", plan.requestedModel, target.Redacted(), err)
-		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to create upstream request")
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to create upstream request", "")
 		return
 	}
 	applyOpenAIChatHeaders(request.Header, r.Header)
 	response, err := client.Do(request)
 	if err != nil {
 		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed after %s%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, time.Since(started).Round(time.Millisecond), clientAbortNote(r), err)
-		writeTranslatedError(w, http.StatusBadGateway, "api_error", "upstream unavailable")
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "upstream unavailable", "")
 		return
 	}
 	defer response.Body.Close()
@@ -481,14 +481,14 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 	upstreamBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		logfContext(plan, upstreamFailureLevel(err, r), "proxy: %s -> %s req=%s failed: cannot read upstream response%s: %s", plan.requestedModel, target.Redacted(), plan.requestID, clientAbortNote(r), err)
-		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to read upstream response")
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to read upstream response", copyRetryAfter(response))
 		return
 	}
 	out, err := translateOpenAIResponse(upstreamBody, plan.requestedModel)
 	if err != nil {
 		logfContext(plan, levelError, "proxy: %s -> %s req=%s failed: cannot translate response (%d upstream bytes): %s", plan.requestedModel, target.Redacted(), plan.requestID, len(upstreamBody), err)
 		dumpUpstreamResponse(plan, response.StatusCode, response.Header, upstreamBody)
-		writeTranslatedError(w, http.StatusBadGateway, "api_error", err.Error())
+		writeTranslatedError(w, http.StatusBadGateway, "api_error", err.Error(), "")
 		return
 	}
 	applyTranslatedResponseHeaders(w.Header(), false)
@@ -543,7 +543,7 @@ func (p *proxy) serveTranslatedError(w http.ResponseWriter, response *http.Respo
 	}
 	logfContext(plan, levelError, "proxy: %s -> %s req=%s upstream rejected the request with %d after %s: %s", plan.requestedModel, plan.targetModel, plan.requestID, response.StatusCode, time.Since(started).Round(time.Millisecond), message)
 	dumpUpstreamResponse(plan, response.StatusCode, response.Header, raw)
-	writeTranslatedError(w, response.StatusCode, anthropicErrorTypeForStatus(response.StatusCode), message)
+	writeTranslatedError(w, response.StatusCode, anthropicErrorTypeForStatus(response.StatusCode), message, copyRetryAfter(response))
 }
 
 // serveCountTokens answers Anthropic's token count locally. The upstream 404s on this
@@ -554,7 +554,7 @@ func (p *proxy) serveCountTokens(w http.ResponseWriter, body []byte, plan reques
 	count := estimateRequestTokens(body)
 	encoded, err := json.Marshal(map[string]int{"input_tokens": count})
 	if err != nil {
-		writeTranslatedError(w, http.StatusInternalServerError, "api_error", "failed to encode token count")
+		writeTranslatedError(w, http.StatusInternalServerError, "api_error", "failed to encode token count", "")
 		return
 	}
 	logf(levelDebug, "proxy: %s count_tokens answered locally with an estimate of %d", plan.requestedModel, count)

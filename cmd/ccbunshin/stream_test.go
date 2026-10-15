@@ -662,6 +662,57 @@ func TestProxyOpenAIChatTranslatesUpstreamError(t *testing.T) {
 	}
 }
 
+// A rate-limited upstream says how long to wait, and that answer has to survive the
+// translation. The translated path builds its own response, so Retry-After does not
+// arrive on its own the way it does on a pass-through. Dropping it left Claude Code
+// backing off for a fraction of a second against an upstream that had asked for minutes,
+// which is what made a rate limit legible only as a retry storm.
+func TestProxyOpenAIChatForwardsRetryAfter(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"slow down","type":"rate_limit_error"}}`))
+	}))
+	defer upstream.Close()
+
+	response := translatedBody(t, openAITestProvider(t, upstream, map[string]string{"claude-opus-5": "oss-model"}),
+		"claude-*", `{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`)
+
+	if got := response.Header().Get("Retry-After"); got != "120" {
+		t.Fatalf("Retry-After = %q, want the upstream's own value forwarded", got)
+	}
+	// The status and envelope still have to describe the rate limit, not the header alone.
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the upstream status preserved", response.Code)
+	}
+	var decoded struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &decoded) != nil || decoded.Error.Type != "rate_limit_error" {
+		t.Fatalf("envelope = %s, want rate_limit_error", response.Body.String())
+	}
+}
+
+// The header is the upstream's to set. An upstream that sends none must not have one
+// invented for it, because a made-up delay is indistinguishable from a real one at the
+// client and would silently override the client's own backoff.
+func TestProxyOpenAIChatOmitsAbsentRetryAfter(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad model","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	response := translatedBody(t, openAITestProvider(t, upstream, map[string]string{"claude-opus-5": "oss-model"}),
+		"claude-*", `{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`)
+
+	if got := response.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want none when the upstream sent none", got)
+	}
+}
+
 func TestProxyOpenAIChatStreamsToRecorder(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
