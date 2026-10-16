@@ -52,8 +52,11 @@ scripts; `install.sh` and `.github/workflows/build.yml` the release path. There 
   script-indirection scan, and the required-reviewer GitHub environment, with what each layer
   catches and what it misses. Read before changing publishing/release setup, and before trusting any
   claim that a gate "covers all git push operations".
-- `README.md` and `cmd/ccbunshin/README.md` - current CLI, proxy, and shell-integration
-  documentation.
+- `README.md` - the whole user documentation: install, profiles, commands, shell integration and
+  completion, the proxy and its `proxy.json` keys, systemd, and build/verify. `cmd/ccbunshin/README.md`
+  is a pointer stub into it, so older references still resolve.
+- `docs/COMPATIBILITY_REVIEW.md` - what to re-check before a release; maintainer-facing, and
+  deliberately not in the README.
 
 ## Key decisions (do not silently reverse)
 
@@ -65,7 +68,7 @@ making it quietly.
 1. Isolation is per-profile `--settings` files, never `CLAUDE_CONFIG_DIR`.
 2. `env` blocks merge per-variable: a variable set only in a lower file survives.
 3. `hooks`, `model`, and `statusLine` isolate per profile; list keys merge and cannot be subtracted.
-4. Profiles carry no credentials; the proxy may read a provider's token from a named environment variable, and `no_auth` sends none (see decision 15).
+4. Profiles carry no credentials; the proxy may read a provider's token from a named environment variable, map headers to variables (`auth_headers`), or send none (`no_auth`). See decision 15.
 5. Scope: isolation, local/global profiles, shell wrappers, the proxy, self-update.
 6. The internal switcher's global settings stay untouched.
 7. The project-aware `claude` wrapper is a thin router over the `.ccbunshin-profile` marker.
