@@ -1964,3 +1964,249 @@ func TestLoadConfigReadsProviderAuth(t *testing.T) {
 		t.Errorf("local authTokenEnv = %q, want empty", got)
 	}
 }
+
+// auth_headers round-trips through a real config file, with a lowercase key landing in the
+// canonical spelling that applyProviderAuth looks up after clearing the credentials.
+func TestLoadConfigReadsAuthHeaders(t *testing.T) {
+	file := writeConfig(t, `{
+	  "port": 3456,
+	  "providers": {
+	    "gw": {
+	      "upstream": "https://gw.example.invalid",
+	      "auth_headers": {"x-api-key": "GW_KEY1", "x-llmgw-api-key": "GW_KEY2"}
+	    }
+	  },
+	  "routes": [{"pattern": "gw-*", "provider": "gw"}]
+	}`)
+	cfg, err := loadConfig(file)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	headers := cfg.providers["gw"].authHeaders
+	if got := headers["X-Api-Key"]; got != "GW_KEY1" {
+		t.Errorf("X-Api-Key -> %q, want the lowercase config key canonicalized", got)
+	}
+	if got := headers["X-Llmgw-Api-Key"]; got != "GW_KEY2" {
+		t.Errorf("X-Llmgw-Api-Key -> %q", got)
+	}
+	if len(headers) != 2 {
+		t.Errorf("authHeaders = %v, want exactly two entries", headers)
+	}
+}
+
+// A provider with no auth key set and one with an explicit key are loaded side by side, and
+// only the second one ends up with a credential descriptor.
+func TestLoadConfigKeepsUnauthenticatedProviderEmpty(t *testing.T) {
+	file := writeConfig(t, `{
+	  "port": 3456,
+	  "providers": {
+	    "plain": {"upstream": "https://plain.example.invalid"},
+	    "keyed": {"upstream": "https://keyed.example.invalid", "auth_token_env": "K"}
+	  },
+	  "routes": [
+	    {"pattern": "plain-*", "provider": "plain"},
+	    {"pattern": "keyed-*", "provider": "keyed"}
+	  ]
+	}`)
+	cfg, err := loadConfig(file)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	plain := cfg.providers["plain"]
+	if plain.authTokenEnv != "" || plain.noAuth || plain.authHeaders != nil {
+		t.Errorf("plain provider carries an auth descriptor: %+v", plain)
+	}
+	if cfg.providers["keyed"].authTokenEnv != "K" {
+		t.Error("keyed provider lost its auth_token_env")
+	}
+}
+
+// The scenario these keys exist for: one session, three providers, each with its own
+// credential, and the third wanting a second credential in a custom header. Every request
+// carries the caller's own token, and the proxy must replace it per provider rather than
+// forwarding whichever credential the profile happened to name.
+func TestProxyRoutesEachProviderItsOwnCredential(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_KEY1", "key-one")
+	t.Setenv("CCBUNSHIN_TEST_KEY2", "key-two")
+	t.Setenv("CCBUNSHIN_TEST_KEY3", "key-three")
+	t.Setenv("CCBUNSHIN_TEST_KEY4", "key-four")
+
+	type seen struct{ auth, apiKey, llmgw string }
+	captured := map[string]*seen{}
+	upstreamFor := func(name string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured[name] = &seen{
+				auth:   r.Header.Get("Authorization"),
+				apiKey: r.Header.Get("X-Api-Key"),
+				llmgw:  r.Header.Get("X-Llmgw-Api-Key"),
+			}
+			_, _ = w.Write([]byte("ok"))
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+
+	one, two, three := upstreamFor("one"), upstreamFor("two"), upstreamFor("three")
+	providers := map[string]loadedProvider{}
+	routes := []loadedRoute{}
+
+	for _, item := range []struct {
+		provider string
+		server   *httptest.Server
+		env      string
+	}{
+		{"one", one, "CCBUNSHIN_TEST_KEY1"},
+		{"two", two, "CCBUNSHIN_TEST_KEY2"},
+	} {
+		p := testProvider(t, item.server, nil)
+		p.authTokenEnv = item.env
+		providers[item.provider] = p
+		routes = append(routes, loadedRoute{pattern: item.provider + "-*", provider: item.provider})
+	}
+
+	// The third wants both: a standard header and a second, custom one, with different
+	// values. This is the case auth_token_env cannot express.
+	parsed, err := url.Parse(three.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers["three"] = loadedProvider{
+		upstream: parsed,
+		timeout:  time.Second,
+		authHeaders: map[string]string{
+			"X-Api-Key":       "CCBUNSHIN_TEST_KEY3",
+			"X-Llmgw-Api-Key": "CCBUNSHIN_TEST_KEY4",
+		},
+	}
+	routes = append(routes, loadedRoute{pattern: "three-*", provider: "three"})
+
+	handler := &proxy{
+		config: loadedConfig{providers: providers, routes: routes},
+		client: one.Client(),
+	}
+	for _, model := range []string{"one-a", "two-a", "three-a"} {
+		request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages",
+			strings.NewReader(`{"model":"`+model+`"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer callers-own-token")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", model, response.Code)
+		}
+	}
+
+	want := map[string]seen{
+		"one":   {auth: "Bearer key-one", apiKey: "key-one"},
+		"two":   {auth: "Bearer key-two", apiKey: "key-two"},
+		"three": {auth: "", apiKey: "key-three", llmgw: "key-four"},
+	}
+	for name, expected := range want {
+		got := captured[name]
+		if got == nil {
+			t.Fatalf("provider %s received no request", name)
+		}
+		if *got != expected {
+			t.Errorf("provider %s got %+v, want %+v", name, *got, expected)
+		}
+	}
+}
+
+// auth_headers sets only what it names. A gateway that takes a custom header and no
+// Authorization must not receive one, including the caller's.
+func TestApplyConfiguredAuthHeadersSetsOnlyNamedHeaders(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_KEY4", "key-four")
+	header := http.Header{}
+	header.Set("Authorization", "Bearer caller-secret")
+	header.Set("X-Api-Key", "caller-key")
+	applyProviderAuth(header, loadedProvider{
+		authHeaders: map[string]string{"X-Llmgw-Api-Key": "CCBUNSHIN_TEST_KEY4"},
+	})
+	if got := header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want it absent", got)
+	}
+	if got := header.Get("X-Api-Key"); got != "" {
+		t.Errorf("X-Api-Key = %q, want it absent", got)
+	}
+	if got := header.Get("X-Llmgw-Api-Key"); got != "key-four" {
+		t.Errorf("X-Llmgw-Api-Key = %q, want the configured value raw", got)
+	}
+}
+
+// Authorization is the one header that carries a scheme, so its value gets Bearer.
+func TestApplyConfiguredAuthHeadersPrefixesBearerForAuthorization(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_KEY1", "key-one")
+	header := http.Header{}
+	applyProviderAuth(header, loadedProvider{
+		authHeaders: map[string]string{"Authorization": "CCBUNSHIN_TEST_KEY1"},
+	})
+	if got := header.Get("Authorization"); got != "Bearer key-one" {
+		t.Errorf("Authorization = %q, want the Bearer scheme added", got)
+	}
+}
+
+// The header name is canonicalized at load, so a lowercase config key still lands in the
+// canonical spelling after applyProviderAuth's clear.
+func TestApplyConfiguredAuthHeadersCanonicalizesName(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_KEY4", "key-four")
+	headers, err := parseAuthHeaders("provider \"p\"", map[string]string{"x-llmgw-api-key": "CCBUNSHIN_TEST_KEY4"})
+	if err != nil {
+		t.Fatalf("parseAuthHeaders: %v", err)
+	}
+	header := http.Header{}
+	applyProviderAuth(header, loadedProvider{authHeaders: headers})
+	if got := header.Get("X-Llmgw-Api-Key"); got != "key-four" {
+		t.Errorf("X-Llmgw-Api-Key = %q, want the canonical name to resolve", got)
+	}
+}
+
+// An entry whose variable is empty is skipped, not filled from another entry.
+func TestApplyConfiguredAuthHeadersSkipsEmptyVariable(t *testing.T) {
+	t.Setenv("CCBUNSHIN_TEST_KEY3", "key-three")
+	header := http.Header{}
+	applyProviderAuth(header, loadedProvider{
+		authHeaders: map[string]string{
+			"X-Api-Key":       "CCBUNSHIN_TEST_KEY3",
+			"X-Llmgw-Api-Key": "CCBUNSHIN_TEST_UNSET_KEY4",
+		},
+	})
+	if got := header.Get("X-Api-Key"); got != "key-three" {
+		t.Errorf("X-Api-Key = %q", got)
+	}
+	if got := header.Get("X-Llmgw-Api-Key"); got != "" {
+		t.Errorf("X-Llmgw-Api-Key = %q, want it unset rather than copied", got)
+	}
+}
+
+func TestParseAuthHeadersRejectsBadInput(t *testing.T) {
+	for _, item := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"invalid name", map[string]string{"X Llmgw Key": "SOME_ENV"}},
+		{"empty value name", map[string]string{"X-Api-Key": ""}},
+		{"name differing only in case", map[string]string{"X-Api-Key": "A", "x-api-key": "B"}},
+	} {
+		if _, err := parseAuthHeaders("provider \"p\"", item.headers); err == nil {
+			t.Errorf("%s: parseAuthHeaders accepted %v", item.name, item.headers)
+		}
+	}
+}
+
+// auth_headers describes credential placement, so it cannot be combined with the
+// single-credential keys.
+func TestLoadConfigRejectsAuthHeadersWithOtherAuthKeys(t *testing.T) {
+	for _, body := range []string{
+		`{"upstream": "https://example.invalid", "auth_headers": {"X-Api-Key": "K"}, "auth_token_env": "T"}`,
+		`{"upstream": "https://example.invalid", "auth_headers": {"X-Api-Key": "K"}, "no_auth": true}`,
+	} {
+		file := writeConfig(t, `{
+		  "port": 3456,
+		  "providers": {"p": `+body+`},
+		  "routes": [{"pattern": "m", "provider": "p"}]
+		}`)
+		if _, err := loadConfig(file); err == nil {
+			t.Errorf("loadConfig accepted %s alongside auth_headers", body)
+		}
+	}
+}

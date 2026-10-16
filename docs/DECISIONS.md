@@ -322,3 +322,34 @@ rejected for the reason above.
 The cost, stated plainly: the daemon reads a credential. It is read from the daemon's own
 environment, which is a shell the user controls, and it is never written back. The systemd unit
 wants `Environment=` or `EnvironmentFile=` for a deployment that uses this.
+
+### 15a. A third key, `auth_headers`, for a provider with two credentials
+
+Added after a real gateway turned up that wants one credential in `x-api-key` and a second, with a
+different value, in `x-llmgw-api-key`. `auth_token_env` cannot express that: its single value goes
+to both standard headers, which is precisely the both-headers rule this decision adopted, and a rule
+that assumes one credential cannot serve a gateway that has two. So the option rejected above - a
+general header map - is now the implemented one, and the both-headers heuristic survives only as the
+shorthand for the single-credential case.
+
+`auth_headers` maps a header name to the environment variable holding its value. It sets exactly
+what it names and nothing else, so a gateway that reads a custom header and no `Authorization` gets
+no `Authorization` at all, the caller's included. `Authorization` is the one name that gets the
+`Bearer ` scheme added, since that is the scheme the HTTP standard defines for it; every other value
+is sent raw, which is what a custom header needs. Names are validated at load as HTTP header field
+names and canonicalized to one spelling, so a lowercase key resolves after the clear and two keys
+differing only in case are rejected rather than one silently winning at `Header.Set`. An entry whose
+variable is empty is skipped, never filled from another entry: a half-configured gateway should fail
+visibly rather than authenticate as the wrong tenant.
+
+The alternative considered and rejected again here was a key that selects which of the two standard
+headers to use. It solves the header-choice problem, not the two-credential problem, and it is
+strictly weaker than a map that can name any header.
+
+`auth_headers` is rejected at load when combined with either other key. A provider with no auth key
+set still forwards the caller's credential unchanged, so the compatibility claim in this decision is
+unchanged.
+
+Validation is a local `validHeaderFieldName` rather than `net/http/httpguts`, because importing
+`golang.org/x/net` would end the dependency-free property, and a name that fails the check would
+otherwise be rejected by `net/http` at send time, inside a request that has already been routed.

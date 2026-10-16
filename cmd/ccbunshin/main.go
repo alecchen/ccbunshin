@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"os/exec"
@@ -37,9 +38,13 @@ type provider struct {
 	Effort       string            `json:"effort,omitempty"`
 	// AuthTokenEnv names the environment variable holding this provider's credential;
 	// the value itself never appears here. NoAuth sends no credential at all, for an
-	// upstream that needs none. Setting both is rejected as contradictory.
-	AuthTokenEnv string `json:"auth_token_env,omitempty"`
-	NoAuth       bool   `json:"no_auth,omitempty"`
+	// upstream that needs none. AuthHeaders maps a header name to the environment
+	// variable holding its value, for a gateway that wants one credential in a standard
+	// header and a second in a custom one. AuthHeaders is incompatible with the other
+	// two, which each describe a single credential.
+	AuthTokenEnv string            `json:"auth_token_env,omitempty"`
+	NoAuth       bool              `json:"no_auth,omitempty"`
+	AuthHeaders  map[string]string `json:"auth_headers,omitempty"`
 }
 type route struct {
 	Pattern       string            `json:"pattern"`
@@ -71,11 +76,14 @@ type loadedProvider struct {
 	defaultModel string
 	configured   bool // whether dialect came from the config rather than the default
 	effort       string
-	// authTokenEnv empty and noAuth false means the caller's own credential is
-	// forwarded unchanged, which is what every config written before these keys
-	// expects. See applyProviderAuth.
+	// authTokenEnv empty, noAuth false, and authHeaders empty means the caller's own
+	// credential is forwarded unchanged, which is what every config written before
+	// these keys expects. See applyProviderAuth.
 	authTokenEnv string
 	noAuth       bool
+	// authHeaders maps a canonical header name to the environment variable holding its
+	// value. Both halves are validated at load.
+	authHeaders map[string]string
 }
 type proxy struct {
 	config loadedConfig
@@ -121,8 +129,15 @@ func loadConfig(filename string) (loadedConfig, error) {
 		if err != nil {
 			return loadedConfig{}, err
 		}
-		if value.NoAuth && value.AuthTokenEnv != "" {
-			return loadedConfig{}, fmt.Errorf("provider %q sets both auth_token_env and no_auth", name)
+		if value.NoAuth && (value.AuthTokenEnv != "" || len(value.AuthHeaders) > 0) {
+			return loadedConfig{}, fmt.Errorf("provider %q sets no_auth together with another auth key", name)
+		}
+		if value.AuthTokenEnv != "" && len(value.AuthHeaders) > 0 {
+			return loadedConfig{}, fmt.Errorf("provider %q sets both auth_token_env and auth_headers", name)
+		}
+		authHeaders, err := parseAuthHeaders(fmt.Sprintf("provider %q", name), value.AuthHeaders)
+		if err != nil {
+			return loadedConfig{}, err
 		}
 		providers[name] = loadedProvider{
 			upstream:     upstream,
@@ -134,10 +149,11 @@ func loadConfig(filename string) (loadedConfig, error) {
 			// explicit anthropic, which validateDialectTargets needs to reason about.
 			configured: value.Dialect != "",
 			effort:     effort,
-			// The variable is read in applyProviderAuth, once per request, so the
-			// secret stays out of the config and a rotated value needs no reload.
+			// The variables are read in applyProviderAuth, once per request, so the
+			// secrets stay out of the config and a rotated value needs no reload.
 			authTokenEnv: value.AuthTokenEnv,
 			noAuth:       value.NoAuth,
+			authHeaders:  authHeaders,
 		}
 	}
 	seen := map[string]bool{}
@@ -704,12 +720,62 @@ func rewriteModelTo(body []byte, target string) []byte {
 	return result
 }
 
+// validHeaderFieldName reports whether name is a legal HTTP header field name: RFC 7230
+// tchar, at least one character. It is here rather than imported because the tool is
+// dependency-free, and a name that fails this would otherwise be rejected by net/http at
+// send time, inside a request that has already been routed.
+func validHeaderFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseAuthHeaders validates a provider's auth_headers map: each key must be a legal HTTP
+// header field name, and each value must name an environment variable. The name is
+// canonicalized to one spelling so a lookup after applyProviderAuth's clear is exact, and
+// so two entries that differ only in case are caught here rather than one silently
+// winning at http.Header.Set.
+//
+// A value is an environment variable NAME, never a credential: that is what keeps the
+// secret out of the config file. A provider that needs a literal header value would have
+// to put the secret in proxy.json, which is a template meant to be copied.
+func parseAuthHeaders(where string, headers map[string]string) (map[string]string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	canonical := make(map[string]string, len(headers))
+	for name, env := range headers {
+		if name == "" || !validHeaderFieldName(name) {
+			return nil, fmt.Errorf("%s auth_headers has an invalid header name %q", where, name)
+		}
+		if env == "" {
+			return nil, fmt.Errorf("%s auth_headers entry %q requires an environment variable name", where, name)
+		}
+		key := textproto.CanonicalMIMEHeaderKey(name)
+		if _, dup := canonical[key]; dup {
+			return nil, fmt.Errorf("%s auth_headers names %q twice", where, key)
+		}
+		canonical[key] = env
+	}
+	return canonical, nil
+}
+
 // applyProviderAuth replaces the caller's credential with the provider's own, when the
 // provider configured one. It runs after the inbound headers are copied, and on both
 // dialect paths, because the caller's credential belongs to whichever provider its own
 // profile named and is wrong for any other.
 //
-// With neither key set the headers are untouched, so a config that says nothing about
+// With no auth key set the headers are untouched, so a config that says nothing about
 // auth forwards the caller's credential exactly as it always did.
 //
 // The token goes into both Authorization and X-Api-Key: which header an upstream reads is
@@ -718,12 +784,16 @@ func rewriteModelTo(body []byte, target string) []byte {
 // removed - the provider asked for its own credential, and sending the caller's instead
 // would be wrong in a way that looks like an authentication failure.
 func applyProviderAuth(dst http.Header, p loadedProvider) {
-	if p.authTokenEnv == "" && !p.noAuth {
+	if p.authTokenEnv == "" && !p.noAuth && len(p.authHeaders) == 0 {
 		return
 	}
 	dst.Del("Authorization")
 	dst.Del("X-Api-Key")
 	if p.noAuth {
+		return
+	}
+	if len(p.authHeaders) > 0 {
+		applyConfiguredAuthHeaders(dst, p.authHeaders)
 		return
 	}
 	token := os.Getenv(p.authTokenEnv)
@@ -733,6 +803,27 @@ func applyProviderAuth(dst http.Header, p loadedProvider) {
 	}
 	dst.Set("Authorization", "Bearer "+token)
 	dst.Set("X-Api-Key", token)
+}
+
+// applyConfiguredAuthHeaders sets exactly the headers the provider named, with no
+// defaulting: a gateway that wants two credentials needs the two values to stay distinct,
+// so nothing is inferred from the header name. The one exception is Authorization, which
+// carries its scheme like every other bearer header.
+//
+// An entry whose environment variable is empty is left unset rather than filled from the
+// other entry or from the caller's credential.
+func applyConfiguredAuthHeaders(dst http.Header, headers map[string]string) {
+	for name, env := range headers {
+		value := os.Getenv(env)
+		if value == "" {
+			logf(levelWarn, "proxy: provider auth_headers entry %s names %s, which is empty; sending no such header", name, env)
+			continue
+		}
+		if name == "Authorization" {
+			value = "Bearer " + value
+		}
+		dst.Set(name, value)
+	}
 }
 
 func runServer(ctx context.Context, cfg loadedConfig) error {
