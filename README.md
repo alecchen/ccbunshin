@@ -296,9 +296,9 @@ ccbunshin proxy init
 
 Routes select the provider; `models` rewrites the model ID after routing.
 
-A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`). `*` matches any run of characters except `/`, so use `xiaomi/*` for a prefixed ID namespace and `*/*` for every prefixed ID; a bare `*` matches only IDs without a slash. Routes are checked in order; the first match wins.
+A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`). `*` does not cross `/`: it matches any run of characters except a slash. A prefixed ID such as `xiaomi/mimo-v2.6-flash` needs `xiaomi/*`, every prefixed ID needs `*/*`, and a bare `*` only ever matches IDs without a slash. Routes are checked in order; the first match wins.
 
-The upstream ID resolves in this order: the route's `models`, the provider's `models`, the provider's `default_model` (a translating dialect only), then the requested ID unchanged. An exact-match route still inherits `default_model` unless that same ID appears in a `models` map, so a route can be answered by a model its pattern does not name. To pin an ID without rewriting it, give it an identity entry: `{"mimo-v2.6-flash": "mimo-v2.6-flash"}`. `resolve` reports what any ID becomes.
+The upstream ID resolves in this order: the route's `models`, the provider's `models`, the provider's `default_model` (a translating dialect only), then the requested ID unchanged. That means an exact-match route still inherits `default_model` unless the same ID appears in a `models` map, so a route can quietly be answered by a model its pattern never names. To pin an ID without rewriting it, give it an identity entry: `{"mimo-v2.6-flash": "mimo-v2.6-flash"}`. `resolve` reports what any ID becomes.
 
 `proxy.json` keys:
 
@@ -429,7 +429,7 @@ Dialect resolution is most-specific-first: the route's `model_dialects` entry fo
 When configuring it:
 
 - A route with dialect `openai-chat` needs somewhere to get an acceptable model ID, or `proxy start` refuses the config. Set `default_model` on the provider, or `models` on the provider or route.
-- An unknown key name (a misspelled `"dialcts"`) is dropped silently by the JSON decoder, so the provider stays on its default. A bad value for a recognized key (`"dialect": "openai"`) fails startup and names the key, so check the key name's spelling first when a provider seems untranslated.
+- A misspelled key name (`"dialcts"`) is dropped by the JSON decoder, and the provider keeps its default without a warning. A bad value for a key that is recognized (`"dialect": "openai"`) fails startup and names the key. When a provider seems untranslated, check the spelling of the key name first.
 
 To find out which endpoint a gateway expects for a given model, POST a one-token request to its `/messages` path and read which endpoint the error names. Model lists often do not say, and an ID's prefix is not a reliable signal.
 
@@ -454,7 +454,7 @@ An `anthropic`-dialect provider is unaffected: nothing is translated, so the cal
 
 ### System One decisions
 
-TypeSafe's System One models, Jev among them, answer typed questions with probabilities instead of text. The request is a shared `state` plus a `questions` object, and the answer is keyed by the same question names. It is not a chat message, so no dialect can translate a Claude Code turn into it: a caller has to send the System One body itself. What this dialect buys is everything around the body - the route table, the provider's own credential, and the per-request log line.
+TypeSafe's System One models, Jev among them, answer typed questions with probabilities instead of text. The request is a shared `state` plus a `questions` object, and the answer comes back keyed by the same question names. It is not a chat message, so no dialect can turn a Claude Code turn into it: the caller has to send the System One body itself. The route table, the provider's own credential, and the per-request log line still apply.
 
 ```json
 {
@@ -481,9 +481,9 @@ curl -s http://127.0.0.1:3456/v1/messages -H 'content-type: application/json' -d
 }'
 ```
 
-The caller's own path is replaced by `/systemone`, so the path above is a placeholder and works as well as any other. The server path in `upstream` is kept, at whatever depth the gateway publishes it.
+The caller's own path is replaced by `/systemone`, so the path in the example is a placeholder and any other works the same. The path in `upstream` is kept at whatever depth the gateway publishes it.
 
-`systemone` requests reach the same route table as everything else, and the model ID is passed through unchanged unless a `models` entry maps it, which rewrites the body's `model`. `default_model` does not apply: it exists to give a translated chat upstream an ID it accepts, and a decision caller already sends a decision model. The `effort` key does not apply either.
+`systemone` requests go through the same route table as everything else. The model ID passes through unless a `models` entry maps it, in which case the body's `model` is rewritten. `default_model` does not apply: it gives a translated chat upstream an ID it accepts, and a decision caller already sends a decision model. `effort` does not apply either.
 
 Jev never streams, and the proxy does not add a stream: a `stream` field in the body is the upstream's to interpret. Upstream errors are passed back as they arrived, at the upstream's status.
 
@@ -497,7 +497,7 @@ By default, authentication is forwarded and never configured: an inbound `Author
 - `auth_headers` - a `{header name: environment variable}` map, for a gateway that needs a second credential in a header of its own naming, or a value that does not belong in either standard header. It sets exactly the headers it names.
 - `no_auth` - send no credential at all, for a local server that needs none.
 
-The default forwarding path differs by dialect. An `anthropic` provider receives the caller's headers unchanged. Every other dialect, `openai-chat` and `systemone` included, strips the Anthropic protocol headers, promotes `x-api-key` to `Authorization: Bearer`, and drops `X-Api-Key`. An upstream that requires `X-Api-Key` specifically therefore needs `auth_token_env`, which sets both headers, or an `auth_headers` entry naming it.
+What the proxy forwards by default depends on the dialect. An `anthropic` provider gets the caller's headers unchanged. Every other dialect, `openai-chat` and `systemone` included, drops the Anthropic protocol headers, moves `x-api-key` into `Authorization: Bearer`, and removes `X-Api-Key`. So an upstream that only reads `X-Api-Key` needs `auth_token_env`, which sets both headers, or an `auth_headers` entry naming it.
 
 With no auth key set, the caller's credential is forwarded exactly as before, which is what every config written before these keys expects. `auth_headers` cannot be combined with either other key, and `auth_token_env` cannot be combined with `no_auth`; a config that does both is refused at startup.
 
@@ -562,14 +562,14 @@ curl -s 'http://127.0.0.1:3456/ccbunshin/resolve?model=claude-opus-5'
 
 `target` is the ID sent upstream, provider prefix included. An unrouted model returns 404 with `{"error": "no route matches this model"}`.
 
-Without `?model=`, the whole route table is returned - the only way to see the routing rules without reading the config file, and the closest thing the proxy has to introspection:
+Without `?model=`, `resolve` returns the whole route table. Apart from reading the config file, it is the only way to see the routing rules:
 
 ```sh
 curl -s 'http://127.0.0.1:3456/ccbunshin/resolve'
 # {"routes":[{"pattern":"claude-*","provider":"gateway","dialect":"openai-chat","upstream":"https://api.example.invalid/provider/v1","default_model":"oss-model"}, ...]}
 ```
 
-Each entry carries `pattern`, `provider`, `dialect`, and `upstream`, plus `default_model` when the provider sets one and `models` when the route or provider has a non-empty map. `dialect` here is the route's configured dialect, since without a model there is no target ID for a `model_dialects` entry to key on.
+Each entry has `pattern`, `provider`, `dialect`, and `upstream`, plus `default_model` when the provider sets one and `models` when the route or provider has a non-empty map. The `dialect` shown is the route's configured dialect rather than the request-time resolution, because with no model in hand there is no target ID for a `model_dialects` entry to key on.
 
 This endpoint exists because a client cannot otherwise learn what its model ID became. A model list cannot answer it: a route is a glob (`claude-*`) with a `default_model`, so the set of matching models is not enumerable. `resolve` answers the specific question for the specific ID. A statusline uses it to show the real model name behind a Claude Code alias.
 

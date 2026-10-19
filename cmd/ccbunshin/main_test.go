@@ -110,6 +110,23 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+// Routing needs a model from the request body, so a bodyless GET cannot reach an upstream.
+// This pins that for the two paths a client probes for a model list: if that ever starts
+// answering, gateway model discovery in Claude Code changes behavior silently.
+func TestModelListPathsAreNotForwarded(t *testing.T) {
+	handler := &proxy{config: loadedConfig{}, client: http.DefaultClient}
+	for _, target := range []string{"/v1/models", "/v1/models?limit=1000", "/model/info"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://proxy.test"+target, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400", target, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), "valid JSON") {
+			t.Errorf("%s body = %q, want the missing-model error", target, response.Body.String())
+		}
+	}
+}
+
 // --- logging ---
 
 func TestParseLogLevel(t *testing.T) {
