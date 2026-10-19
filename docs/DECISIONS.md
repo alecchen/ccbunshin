@@ -364,3 +364,22 @@ unchanged.
 Validation is a local `validHeaderFieldName` rather than `net/http/httpguts`, because importing
 `golang.org/x/net` would end the dependency-free property, and a name that fails the check would
 otherwise be rejected by `net/http` at send time, inside a request that has already been routed.
+
+## 16. No gateway model-list endpoint
+
+`GET /v1/models` and `/model/info` return 400 like any other bodyless request, because routing
+reads the model from the body. `TestModelListPathsAreNotForwarded` pins that.
+
+Serving a list is technically easy (`ServeHTTP` already branches before reading a body for
+`/healthz` and `/ccbunshin/resolve`), and it was rejected as a design, not as an effort estimate:
+
+- **A glob route has no enumerable model set.** `claude-*` with a `default_model` describes
+  infinitely many IDs, so any published list is either a guess or a subset presented as complete.
+- **Discovery is cached and then trusted.** Claude Code writes the response to
+  `~/.claude/cache/gateway-models.json` on the first start and keeps only IDs containing `claude` or
+  `anthropic`, so a stale or invented entry steers sessions for as long as the cache lives. That
+  turns a mislabeled model into a misrouted one.
+
+`/ccbunshin/resolve` answers the question discovery is meant to answer, for one ID at a time and
+from the same route table the request path uses. A future list endpoint would have to publish only
+explicit map keys and exact patterns, never `default_model` fallbacks, to be safe.
