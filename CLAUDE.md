@@ -43,9 +43,6 @@ scripts; `install.sh` and `.github/workflows/build.yml` the release path. There 
 - `docs/PLAN_RESPONSES_DIALECT_AND_TOOL_SEARCH.md` - planned work: a third dialect for OpenAI's
   Responses API, and what tool search (`ENABLE_TOOL_SEARCH`) does through the proxy. Read before
   changing dialect handling or tool translation.
-- `docs/PLAN_JEV_SKILL_FORK.md` - planned work: forking the official TypeSafe skill for the
-  Command Code System One endpoint, with the verified request shape. Read before writing or
-  changing that skill.
 - `docs/OPENCODE_ZEN.md` and `docs/OPENCODE_GO.md` - reference: the endpoint shape of those two
   gateways, which models each serves, and which dialect each group needs. Dated snapshots; re-verify
   against the live tables before trusting a model id.

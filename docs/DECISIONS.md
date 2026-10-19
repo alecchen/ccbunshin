@@ -97,6 +97,12 @@ probabilities, so no Claude Code turn can be translated into it and none should 
 dialect therefore replaces the caller's path and forwards the body, which is what makes the route
 table, per-provider credentials, and the request log reach a decision endpoint.
 
+The skill that writes such a caller lives outside this repo, at `~/.claude/skills/jev/`. It is a
+fork of TypeSafe's MIT `typesafe-ai` skill with the host, the credential variable, and the model
+ids replaced, and it ships `scripts/verify.py`, which runs its own examples against the live
+endpoint. Nothing in it belongs in `cmd/`: the dialect is the only behavior here, and the skill is
+what an agent reads to send a body the dialect already knows how to forward.
+
 `default_model` resolves only for a translating dialect. It exists because a chat upstream refuses
 Claude Code model ids, and a pass-through caller already sends an id its upstream accepts; applying
 it to the other dialects rewrote ids their upstreams were waiting for (fixed with `systemone`, and
