@@ -12,13 +12,29 @@ import (
 //
 // anthropic passes the caller's request through byte-for-byte, which is what every
 // config written before dialects existed expects. openai-chat translates an Anthropic
-// /v1/messages call onto an OpenAI-compatible /chat/completions call.
+// /v1/messages call onto an OpenAI-compatible /chat/completions call. systemone forwards
+// the caller's System One body unchanged onto /systemone, for a decision endpoint that
+// answers probabilities rather than text.
 type dialect string
 
 const (
 	dialectAnthropic  dialect = "anthropic"
 	dialectOpenAIChat dialect = "openai-chat"
+	dialectSystemOne  dialect = "systemone"
 )
+
+// appendsPath reports whether a dialect reaches its upstream by appending a fixed
+// endpoint to the provider upstream, as opposed to forwarding the caller's own path.
+func (d dialect) appendsPath() bool {
+	return d == dialectOpenAIChat || d == dialectSystemOne
+}
+
+// rewritesModel reports whether the target model is derived by the proxy. Only a
+// translating dialect needs it: a chat upstream refuses the caller's Anthropic model ids,
+// while a pass-through caller already sends the id its upstream accepts.
+func (d dialect) rewritesModel() bool {
+	return d == dialectOpenAIChat
+}
 
 // parseDialect reads an optional config value. An empty value is the pass-through
 // dialect, because existing configs at ~/.config/ccbunshin/proxy.json and
@@ -30,8 +46,18 @@ func parseDialect(where, value string) (dialect, error) {
 		return dialectAnthropic, nil
 	case string(dialectOpenAIChat):
 		return dialectOpenAIChat, nil
+	case string(dialectSystemOne):
+		return dialectSystemOne, nil
 	}
-	return "", fmt.Errorf("%s dialect must be %q or %q", where, dialectAnthropic, dialectOpenAIChat)
+	return "", fmt.Errorf("%s dialect must be %q, %q, or %q", where, dialectAnthropic, dialectOpenAIChat, dialectSystemOne)
+}
+
+// systemOneSupported reports whether a model id is one the System One endpoint answers
+// for. Jev answers only for typesafe/* ids, and the upstream names the supported ids in
+// its refusal, so a jev route without a mapping is caught at load rather than one failed
+// request at a time.
+func systemOneSupported(model string) bool {
+	return strings.HasPrefix(model, "typesafe/")
 }
 
 // parseEffort reads an optional reasoning_effort default. Unlike dialect, an unset value
@@ -79,11 +105,13 @@ func (c loadedConfig) planFor(model string) (requestPlan, bool) {
 		if !ok {
 			return requestPlan{}, false
 		}
+		// The target model is resolved first for the translating dialect only: its
+		// outcome decides whether a model_dialects key below is the one that applies.
 		target := item.models[model]
 		if target == "" {
 			target = p.models[model]
 		}
-		if target == "" {
+		if target == "" && p.dialect.rewritesModel() {
 			target = p.defaultModel
 		}
 		if target == "" {
@@ -102,6 +130,12 @@ func (c loadedConfig) planFor(model string) (requestPlan, bool) {
 		}
 		if d == "" {
 			d = dialectAnthropic
+		}
+		// The provider default is a chat-upstream rewrite; it must not reach a
+		// pass-through caller, which already sends the id its upstream accepts.
+		// Applied after resolution because an explicit mapping always applies.
+		if target == model && d.rewritesModel() && p.defaultModel != "" {
+			target = p.defaultModel
 		}
 		// Effort is a default, never an override. Claude Code states an effort on every
 		// effort-capable request (/effort is session-level and re-sent each turn), so a
@@ -125,20 +159,20 @@ func (c loadedConfig) planFor(model string) (requestPlan, bool) {
 }
 
 // isAnthropicOnlyHeader reports whether a request header describes the Anthropic
-// protocol and must not be forwarded to an OpenAI-chat upstream.
+// protocol and must not be forwarded to an upstream that does not speak it.
 func isAnthropicOnlyHeader(key string) bool {
 	switch strings.ToLower(key) {
 	case "x-api-key", "anthropic-version", "anthropic-beta",
-		"anthropic-dangerous-direct-browser-access", "host":
+		"anthropic-dangerous-direct-browser-access", "anthropic-workspace-id", "host":
 		return true
 	}
-	return false
+	return strings.HasPrefix(strings.ToLower(key), "anthropic-")
 }
 
-// applyOpenAIChatHeaders fills dst from an inbound Anthropic request for an OpenAI-chat
-// upstream. The caller's own credential is forwarded: an existing Bearer token as-is, an
-// x-api-key promoted to Bearer. Nothing is read from config, so no secret lives there.
-func applyOpenAIChatHeaders(dst, src http.Header) {
+// applyPassThroughHeaders fills dst from an inbound Anthropic request for an upstream
+// that does not speak it. The caller's own credential is forwarded, never read from
+// config, so no secret lives there.
+func applyPassThroughHeaders(dst, src http.Header) {
 	for key, values := range src {
 		if isAnthropicOnlyHeader(key) {
 			continue
@@ -147,7 +181,9 @@ func applyOpenAIChatHeaders(dst, src http.Header) {
 			dst.Add(key, value)
 		}
 	}
-	// The body is re-encoded, so anything describing the inbound encoding is now wrong.
+	// The body may be re-encoded, so anything describing the inbound encoding is now
+	// wrong. systemone forwards the body unchanged, and normalizing it to JSON is the
+	// one constant it expects anyway.
 	dst.Del("Content-Length")
 	dst.Del("Accept-Encoding")
 	dst.Set("Content-Type", "application/json")
@@ -158,6 +194,8 @@ func applyOpenAIChatHeaders(dst, src http.Header) {
 	} else {
 		dst.Del("Authorization")
 	}
+	// Jev accepts either credential header. Sending both, the provider-auth rule for a
+	// configured token, would carry the caller's key into a header it never used.
 	dst.Del("X-Api-Key")
 }
 

@@ -79,10 +79,21 @@ returns Claude's exit status.
 ## 8. The proxy's protocol translation is opt-in per provider
 
 And it never derives `reasoning_effort` from `thinking`. `dialect` on a provider, route, or
-`model_dialects` entry selects between `anthropic` (default, byte-for-byte pass-through) and
-`openai-chat` (Anthropic `/v1/messages` translated onto OpenAI `/chat/completions`). Resolution is
+`model_dialects` entry selects between `anthropic` (default, byte-for-byte pass-through),
+`openai-chat` (Anthropic `/v1/messages` translated onto OpenAI `/chat/completions`), and
+`systemone` (a System One decision body forwarded unchanged onto `/systemone`). Resolution is
 most-specific-first, and because a dialect belongs to a model rather than a provider, one gateway
-serving both kinds is expressed as two routes in different namespaces.
+serving several kinds is expressed as several routes in different namespaces.
+
+`systemone` is the first non-chat dialect: TypeSafe's Jev answers typed questions with
+probabilities, so no Claude Code turn can be translated into it and none should be invented. The
+dialect therefore replaces the caller's path and forwards the body, which is what makes the route
+table, per-provider credentials, and the request log reach a decision endpoint.
+
+`default_model` resolves only for a translating dialect. It exists because a chat upstream refuses
+Claude Code model ids, and a pass-through caller already sends an id its upstream accepts; applying
+it to the other dialects rewrote ids their upstreams were waiting for (fixed with `systemone`, and
+`/ccbunshin/resolve` reported the invented target).
 
 **Deriving** `reasoning_effort` from Anthropic `thinking` is the bug this replaces, so `thinking`
 is never forwarded and reasoning is recovered from the upstream response instead. A caller-**stated**

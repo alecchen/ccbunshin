@@ -1833,10 +1833,10 @@ func TestApplyProviderAuthEmptyTokenSendsNone(t *testing.T) {
 
 // The openai-chat path promotes an inbound x-api-key to Bearer, so X-Api-Key must not
 // survive into the upstream request. applyProviderAuth clears it, but a config with no
-// auth block relies on applyOpenAIChatHeaders doing it.
+// auth block relies on applyPassThroughHeaders doing it.
 func TestOpenAIChatDoesNotForwardXAPIKey(t *testing.T) {
 	header := http.Header{}
-	applyOpenAIChatHeaders(header, http.Header{"X-Api-Key": {"sk-test"}})
+	applyPassThroughHeaders(header, http.Header{"X-Api-Key": {"sk-test"}})
 	if got := header.Get("X-Api-Key"); got != "" {
 		t.Errorf("X-Api-Key = %q, want it dropped for an openai-chat upstream", got)
 	}

@@ -90,11 +90,7 @@ explicit `role` is required, and omitting it returns
 `400 INVALID_ARGUMENT: Please use a valid role: user, model`. Without the `:generateContent` suffix
 the same path returns a bodyless 400.
 
-**`/inference/v1/systemone`** (2 ids) is undetermined. The path exists and answers under this key,
-but every body shape tried - `messages`, `input`, and `prompt` - returns
-`400 {"detail":{"error_type":"api_usage_error","message":"Invalid request."}}`, against a 404 for an
-unknown path. Whether `jev-1.13-free` is open or gated is therefore unknown; it is not a 403, so it
-is not the same gate as the rest of the free tier.
+**`/inference/v1/systemone`** (2 ids: `jev-1.13`, `jev-1.13-free`) is unverified. This host's `systemone` answered 200 for the provider's own id space, while every earlier body shape here returned `400 api_usage_error`. The dialect in `ccbunshin` (`"systemone"`) forwards the caller's body to `/systemone` unchanged, so whether these two ids answer is one request away, not a code change. Re-probe before documenting them as reachable.
 
 ## Models that fail despite being advertised
 

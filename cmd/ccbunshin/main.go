@@ -208,24 +208,26 @@ func loadConfig(filename string) (loadedConfig, error) {
 	return cfg, nil
 }
 
-// validateDialectTargets rejects an openai-chat route that has nowhere to get a model id
-// the upstream will accept. Without a mapping, every routed Claude Code id would be
-// forwarded verbatim to an upstream that refuses it, so the mistake is caught at load
-// rather than one failed request at a time.
+// validateDialectTargets rejects a translating route that has nowhere to get a model id
+// the upstream will accept, and a System One route whose models the endpoint refuses.
+// Both are config mistakes that would otherwise surface one failed request at a time.
 //
 // Only configured values are consulted, never the anthropic default: a config that says
-// nothing about dialacts is a pass-through config, and its lack of a model mapping is
+// nothing about dialects is a pass-through config, and its lack of a model mapping is
 // not an error.
 func validateDialectTargets(cfg loadedConfig) error {
 	for _, item := range cfg.routes {
 		p := cfg.providers[item.provider]
-		openAIChat := false
+		routeDialect := p.dialect
 		if item.configured {
-			openAIChat = item.dialect == dialectOpenAIChat
-		} else if p.configured {
-			openAIChat = p.dialect == dialectOpenAIChat
+			routeDialect = item.dialect
 		}
-		if !openAIChat {
+		if routeDialect == dialectSystemOne {
+			if err := validateSystemOneModels(item); err != nil {
+				return err
+			}
+		}
+		if routeDialect != dialectOpenAIChat {
 			continue
 		}
 		if len(item.models) > 0 || len(p.models) > 0 || p.defaultModel != "" {
@@ -237,6 +239,25 @@ func validateDialectTargets(cfg loadedConfig) error {
 		)
 	}
 	return nil
+}
+
+// validateSystemOneModels checks the ids a System One route can send, both the explicit
+// mappings and the route pattern itself. The endpoint answers for typesafe/* ids only and
+// names them in its refusal, so the check encodes that instead of learning it per request.
+func validateSystemOneModels(item loadedRoute) error {
+	for _, target := range item.models {
+		if !systemOneSupported(target) {
+			return fmt.Errorf("route %q maps to %q, which the %q dialect endpoint refuses", item.pattern, target, dialectSystemOne)
+		}
+	}
+	if strings.Contains(item.pattern, "*") {
+		return nil
+	}
+	// An exact pattern with a mapping sends the mapped id, which the loop above checked.
+	if _, mapped := item.models[item.pattern]; mapped || systemOneSupported(item.pattern) {
+		return nil
+	}
+	return fmt.Errorf("route %q uses dialect %q but the endpoint answers only for typesafe/* models", item.pattern, dialectSystemOne)
 }
 
 // providerFor returns the first provider whose route matches, ignoring dialects. planFor
@@ -301,6 +322,10 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		plan.inputTokens = estimateRequestTokens(body)
 		body = rewriteModelTo(body, plan.targetModel)
 		p.serveOpenAIChat(w, r, body, plan, client)
+		return
+	}
+	if plan.dialect == dialectSystemOne {
+		p.serveSystemOne(w, r, body, plan, client)
 		return
 	}
 	body = rewriteModel(body, plan.provider.models)
@@ -401,19 +426,41 @@ func (p *proxy) routeTableJSON() []byte {
 // serveAnthropic forwards an Anthropic-dialect request unchanged. This is the behavior
 // every pre-dialect config expects, and it must stay byte-for-byte.
 func (p *proxy) serveAnthropic(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
+	p.passThrough(w, r, body, plan, client, r.URL.Path, r.URL.RawQuery)
+}
+
+// serveSystemOne forwards a System One request onto the dialect's fixed endpoint. The
+// caller's path is replaced rather than appended: that endpoint is the only one the
+// upstream serves for these models, and the caller's path (a client's own /v1/messages)
+// would double-prefix. The caller's query is dropped for the same reason openai-chat
+// drops it: it belongs to the path it came in on. Only an explicit models mapping
+// re-encodes the body; otherwise it goes upstream byte for byte.
+func (p *proxy) serveSystemOne(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client) {
+	p.passThrough(w, r, rewriteModelTo(body, plan.targetModel), plan, client, "/systemone", "")
+}
+
+// passThrough sends the caller's body to one upstream path and copies the response back
+// unchanged, for every dialect that does not translate.
+func (p *proxy) passThrough(w http.ResponseWriter, r *http.Request, body []byte, plan requestPlan, client *http.Client, path, rawQuery string) {
 	started := time.Now()
 	provider := plan.provider
 	target := *provider.upstream
-	target.Path = strings.TrimRight(target.Path, "/") + "/" + strings.TrimLeft(r.URL.Path, "/")
-	target.RawQuery = r.URL.RawQuery
+	target.Path = strings.TrimRight(target.Path, "/") + path
+	target.RawQuery = rawQuery
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		logf(levelError, "proxy: %s -> %s failed: cannot build upstream request: %s", plan.requestedModel, target.Redacted(), err)
 		http.Error(w, "failed to create upstream request", http.StatusBadGateway)
 		return
 	}
-	copyHeaders(request.Header, r.Header)
-	request.Header.Del("Host")
+	// An Anthropic upstream gets the caller's headers as they are. Any other upstream
+	// must not: the Anthropic protocol headers describe a body it does not accept.
+	if plan.dialect == dialectAnthropic {
+		copyHeaders(request.Header, r.Header)
+		request.Header.Del("Host")
+	} else {
+		applyPassThroughHeaders(request.Header, r.Header)
+	}
 	applyProviderAuth(request.Header, provider)
 	response, err := client.Do(request)
 	if err != nil {
@@ -496,7 +543,7 @@ func (p *proxy) serveOpenAIChat(w http.ResponseWriter, r *http.Request, body []b
 		writeTranslatedError(w, http.StatusBadGateway, "api_error", "failed to create upstream request", "")
 		return
 	}
-	applyOpenAIChatHeaders(request.Header, r.Header)
+	applyPassThroughHeaders(request.Header, r.Header)
 	applyProviderAuth(request.Header, plan.provider)
 	response, err := client.Do(request)
 	if err != nil {

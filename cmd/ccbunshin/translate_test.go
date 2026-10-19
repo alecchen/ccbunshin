@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -147,7 +148,7 @@ func TestPlanForRouteModelsOverrideProviderModels(t *testing.T) {
 
 func TestPlanForTargetModelFallbackChain(t *testing.T) {
 	providers := map[string]loadedProvider{
-		"p": {models: map[string]string{"mapped": "from-provider"}, defaultModel: "from-default"},
+		"p": {dialect: dialectOpenAIChat, models: map[string]string{"mapped": "from-provider"}, defaultModel: "from-default"},
 	}
 	cfg := loadedConfig{
 		providers: providers,
@@ -166,6 +167,135 @@ func TestPlanForTargetModelFallbackChain(t *testing.T) {
 		if plan.targetModel != want {
 			t.Errorf("%s target = %q, want %q", model, plan.targetModel, want)
 		}
+	}
+}
+
+// default_model is a rewrite for a translating upstream, which refuses the caller's
+// Claude Code ids. A pass-through caller already sends the id its upstream accepts, so
+// the default must not displace it.
+func TestPlanForDefaultModelSkipsNonTranslatingDialects(t *testing.T) {
+	for _, d := range []dialect{dialectAnthropic, dialectSystemOne} {
+		cfg := loadedConfig{
+			providers: map[string]loadedProvider{"p": {dialect: d, defaultModel: "chat-model"}},
+			routes:    []loadedRoute{{pattern: "typesafe/*", provider: "p"}},
+		}
+		plan, _ := cfg.planFor("typesafe/jev")
+		if plan.targetModel != "typesafe/jev" {
+			t.Errorf("%s target = %q, want the requested id unchanged", d, plan.targetModel)
+		}
+	}
+}
+
+func TestParseDialectAcceptsSystemOne(t *testing.T) {
+	d, err := parseDialect("provider \"p\"", "systemone")
+	if err != nil || d != dialectSystemOne {
+		t.Fatalf("dialect = %q, err = %v", d, err)
+	}
+}
+
+func TestLoadConfigRejectsSystemOneModelTheEndpointRefuses(t *testing.T) {
+	for name, config := range map[string]string{
+		"mapped": `{"port": 3456, "providers": {"p": {"upstream": "https://gw.example.invalid"}}, "routes": [{"pattern": "jev", "provider": "p", "dialect": "systemone", "models": {"jev": "jev"}}]}`,
+		"exact":  `{"port": 3456, "providers": {"p": {"upstream": "https://gw.example.invalid"}}, "routes": [{"pattern": "jev", "provider": "p", "dialect": "systemone"}]}`,
+	} {
+		if _, err := loadConfig(writeConfig(t, config)); err == nil {
+			t.Errorf("%s: a model the endpoint refuses was accepted", name)
+		}
+	}
+}
+
+// serveSystemOne is pass-through with a fixed endpoint: the caller's path is replaced,
+// the query dropped, an explicit mapping rewrites the model, and the rest of the body
+// reaches the upstream byte for byte.
+func TestProxySystemOneForwardsToFixedEndpoint(t *testing.T) {
+	body := `{"model":"typesafe/jev","state":"the sky is blue","questions":{"q":{"type":"noul","instructions":"is it?"}}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/systemone" {
+			t.Errorf("path = %s, want the provider upstream plus /systemone", r.URL.Path)
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("query = %q, want it dropped", r.URL.RawQuery)
+		}
+		if got, _ := io.ReadAll(r.Body); string(got) != body {
+			t.Errorf("body = %s, want it forwarded unchanged", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"typesafe/jev","answers":{"q":{"type":"noul","noul":0.9}}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL + "/v1")
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": {upstream: parsed, dialect: dialectSystemOne, defaultModel: "ignored"}},
+			routes:    []loadedRoute{testRoute("typesafe/*", "p")},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages?beta=true", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Api-Key", "sk-test")
+	request.Header.Set("Anthropic-Version", "2023-06-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"noul":0.9`) {
+		t.Fatalf("upstream body was altered: %s", response.Body.String())
+	}
+}
+
+func TestProxySystemOneAppliesAnExplicitModelMapping(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"model":"typesafe/jev-1.14.0"`) {
+			t.Errorf("mapped model did not reach the upstream: %s", body)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": {upstream: parsed, dialect: dialectSystemOne, defaultModel: "typesafe/jev-1.14.0"}},
+			routes:    []loadedRoute{{pattern: "typesafe/jev-alias", provider: "p", models: map[string]string{"typesafe/jev-alias": "typesafe/jev-1.14.0"}}},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/systemone", strings.NewReader(`{"model":"typesafe/jev-alias","state":"x","questions":{}}`))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+}
+
+// serveSystemOne is the only path where the header handling applies without also
+// re-encoding the body, so it is where the dropped credential header would show.
+func TestProxySystemOneDropsAnthropicHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Anthropic-Version") != "" || r.Header.Get("Anthropic-Beta") != "" {
+			t.Errorf("anthropic headers reached the upstream: %v", r.Header)
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test" || r.Header.Get("X-Api-Key") != "" {
+			t.Errorf("authorization = %q, x-api-key = %q, want the key promoted and removed", r.Header.Get("Authorization"), r.Header.Get("X-Api-Key"))
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	handler := &proxy{
+		config: loadedConfig{
+			providers: map[string]loadedProvider{"p": {upstream: parsed, dialect: dialectSystemOne}},
+			routes:    []loadedRoute{testRoute("typesafe/*", "p")},
+		},
+		client: upstream.Client(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/systemone", strings.NewReader(`{"model":"typesafe/jev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Api-Key", "sk-test")
+	request.Header.Set("Anthropic-Version", "2023-06-01")
+	request.Header.Set("Anthropic-Beta", "foo")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
 	}
 }
 

@@ -301,15 +301,16 @@ A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` m
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
-- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry. Optional `effort` is the `reasoning_effort` applied when the caller states none - see below. Optional `auth_token_env`, `auth_headers`, and `no_auth` give a provider its own credential - see [Provider credentials](#provider-credentials). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back. Those are the only two values. A bad value is rejected at startup, so `proxy start` fails and names the key rather than forwarding requests the wrong way.
+- `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry, for a translating dialect only. Optional `effort` is the `reasoning_effort` applied when the caller states none - see below. Optional `auth_token_env`, `auth_headers`, and `no_auth` give a provider its own credential - see [Provider credentials](#provider-credentials). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back; `systemone` forwards a System One decision request unchanged onto `/systemone`. Those are the only three values. A bad value is rejected at startup, so `proxy start` fails and names the key rather than forwarding requests the wrong way.
 - `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream), and `effort` (overriding the provider's).
 
 The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
 
-`dialect` says which wire format a route's upstream speaks, and there are two:
+`dialect` says which wire format a route's upstream speaks, and there are three:
 
 - `"anthropic"` - the default, and what you get with no `dialect` key at all. The request goes upstream byte-for-byte, so nothing is translated and nothing can be lost in translation. Use it for anything that already accepts `/v1/messages`, including a real Anthropic endpoint, a gateway in front of one, or another Anthropic-shaped proxy.
 - `"openai-chat"` - for a gateway that speaks OpenAI's `/chat/completions` instead. The proxy then converts `system`, content blocks, `tools`, and `tool_choice` to their chat-completions equivalents; returns upstream `reasoning` as Anthropic `thinking` blocks; answers `/v1/messages/count_tokens` locally with an estimate; reports upstream prompt-cache hits as `cache_read_input_tokens` with the hit count subtracted out of `input_tokens`; and rewraps upstream errors in Anthropic's error envelope. `reasoning_effort` is never derived from `thinking` - that translation is what several such gateways reject - but a caller that states an effort of its own gets it forwarded. See [Translating providers](#translating-providers) and [Effort](#effort).
+- `"systemone"` - for a System One decision endpoint, where a model answers typed questions with probabilities instead of text. The caller's body is forwarded unchanged to the provider upstream plus `/systemone`; there is nothing to translate, because the request is not a chat message. The caller's path and query are replaced, Anthropic protocol headers are dropped, and the response comes back as it arrived, errors included. Jev does not stream and only answers for `typesafe/*` model IDs, which `proxy start` checks. See [System One decisions](#system-one-decisions).
 
 Any other value is an error, not a silent fallback: `proxy start` refuses the config and names the offending key. Set `dialect` on a provider, on a route (overriding the provider), or per target model in a route's `model_dialects`.
 
@@ -448,6 +449,41 @@ Set it on a provider, or on a route to override the provider's. A route pattern 
 A route's `effort` overrides the provider's, and an empty value means no default at all.
 
 An `anthropic`-dialect provider is unaffected: nothing is translated, so the caller's own `output_config` goes upstream untouched and `effort` is not consulted.
+
+### System One decisions
+
+TypeSafe's System One models, Jev among them, answer typed questions with probabilities instead of text. The request is a shared `state` plus a `questions` object, and the answer is keyed by the same question names. It is not a chat message, so no dialect can translate a Claude Code turn into it: a caller has to send the System One body itself. What this dialect buys is everything around the body - the route table, the provider's own credential, and the per-request log line.
+
+```json
+{
+  "providers": {
+    "decisions": {
+      "upstream": "https://gateway.example.invalid/v1",
+      "auth_token_env": "DECISIONS_API_KEY"
+    }
+  },
+  "routes": [
+    { "pattern": "typesafe/*", "provider": "decisions", "dialect": "systemone" }
+  ]
+}
+```
+
+```sh
+curl -s http://127.0.0.1:3456/v1/messages -H 'content-type: application/json' -d '{
+  "model": "typesafe/jev",
+  "state": "My payments have failed for three days and I am losing sales.",
+  "questions": {
+    "is_urgent": {"type": "noul", "instructions": "Does this need urgent attention?"},
+    "department": {"type": "choice", "instructions": "Which team?", "criteria": {"billing": "charges", "shipping": "delivery"}}
+  }
+}'
+```
+
+The caller's own path is replaced by `/systemone`, so the path above is a placeholder and works as well as any other. The server path in `upstream` is kept, at whatever depth the gateway publishes it.
+
+`systemone` requests reach the same route table as everything else, and the model ID is passed through unchanged unless a `models` entry maps it, which rewrites the body's `model`. `default_model` does not apply: it exists to give a translated chat upstream an ID it accepts, and a decision caller already sends a decision model. The `effort` key does not apply either.
+
+Jev never streams, and the proxy does not add a stream: a `stream` field in the body is the upstream's to interpret. Upstream errors are passed back as they arrived, at the upstream's status.
 
 ### Provider credentials
 
