@@ -1,5 +1,8 @@
 # README corrections from a live proxy review
 
+Status: applied to `README.md`. Kept as the record of what was wrong and the evidence; the
+suggested text below is the wording that landed, with light editing.
+
 Findings from running the proxy against a 95-model Command Code account
 (`api.commandcode.ai`) and reading `cmd/ccbunshin/` at `bdf511c` plus the
 systemone dialect from `8befbca`. Each item states what the README claims now, what

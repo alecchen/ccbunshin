@@ -296,7 +296,9 @@ ccbunshin proxy init
 
 Routes select the provider; `models` rewrites the model ID after routing.
 
-A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`), and `*` matches any run of characters (`"claude-*"` matches `claude-sonnet-4-5`). Routes are checked in order; the first match wins. Once routed, the provider's `models` map optionally replaces the request's model ID with the upstream's ID before forwarding.
+A pattern with no wildcard matches one exact model (`"qwen-3.8-27b"`). `*` matches any run of characters except `/`, so use `xiaomi/*` for a prefixed ID namespace and `*/*` for every prefixed ID; a bare `*` matches only IDs without a slash. Routes are checked in order; the first match wins.
+
+The upstream ID resolves in this order: the route's `models`, the provider's `models`, the provider's `default_model` (a translating dialect only), then the requested ID unchanged. An exact-match route still inherits `default_model` unless that same ID appears in a `models` map, so a route can be answered by a model its pattern does not name. To pin an ID without rewriting it, give it an identity entry: `{"mimo-v2.6-flash": "mimo-v2.6-flash"}`. `resolve` reports what any ID becomes.
 
 `proxy.json` keys:
 
@@ -427,7 +429,7 @@ Dialect resolution is most-specific-first: the route's `model_dialects` entry fo
 When configuring it:
 
 - A route with dialect `openai-chat` needs somewhere to get an acceptable model ID, or `proxy start` refuses the config. Set `default_model` on the provider, or `models` on the provider or route.
-- A misspelled dialect key is ignored rather than rejected, so the provider silently stays on the default. The config format intentionally allows unknown keys; check the spelling if a provider seems untranslated.
+- An unknown key name (a misspelled `"dialcts"`) is dropped silently by the JSON decoder, so the provider stays on its default. A bad value for a recognized key (`"dialect": "openai"`) fails startup and names the key, so check the key name's spelling first when a provider seems untranslated.
 
 To find out which endpoint a gateway expects for a given model, POST a one-token request to its `/messages` path and read which endpoint the error names. Model lists often do not say, and an ID's prefix is not a reliable signal.
 
@@ -495,6 +497,8 @@ By default, authentication is forwarded and never configured: an inbound `Author
 - `auth_headers` - a `{header name: environment variable}` map, for a gateway that needs a second credential in a header of its own naming, or a value that does not belong in either standard header. It sets exactly the headers it names.
 - `no_auth` - send no credential at all, for a local server that needs none.
 
+The default forwarding path differs by dialect. An `anthropic` provider receives the caller's headers unchanged. Every other dialect, `openai-chat` and `systemone` included, strips the Anthropic protocol headers, promotes `x-api-key` to `Authorization: Bearer`, and drops `X-Api-Key`. An upstream that requires `X-Api-Key` specifically therefore needs `auth_token_env`, which sets both headers, or an `auth_headers` entry naming it.
+
 With no auth key set, the caller's credential is forwarded exactly as before, which is what every config written before these keys expects. `auth_headers` cannot be combined with either other key, and `auth_token_env` cannot be combined with `no_auth`; a config that does both is refused at startup.
 
 Every value is the name of an environment variable, never the secret, so `proxy.json` stays safe to copy and share. The daemon reads those variables from its own environment, which is the shell that ran `ccbunshin proxy start`:
@@ -556,11 +560,20 @@ curl -s 'http://127.0.0.1:3456/ccbunshin/resolve?model=claude-opus-5'
 # {"dialect":"openai-chat","requested":"claude-opus-5","target":"oss-model"}
 ```
 
-`target` is the ID sent upstream, provider prefix included. An unrouted model returns 404 with `{"error": "no route matches this model"}`. Without `?model=` the whole route table is returned, so a client can discover the routes without reading the config file.
+`target` is the ID sent upstream, provider prefix included. An unrouted model returns 404 with `{"error": "no route matches this model"}`.
+
+Without `?model=`, the whole route table is returned - the only way to see the routing rules without reading the config file, and the closest thing the proxy has to introspection:
+
+```sh
+curl -s 'http://127.0.0.1:3456/ccbunshin/resolve'
+# {"routes":[{"pattern":"claude-*","provider":"gateway","dialect":"openai-chat","upstream":"https://api.example.invalid/provider/v1","default_model":"oss-model"}, ...]}
+```
+
+Each entry carries `pattern`, `provider`, `dialect`, and `upstream`, plus `default_model` when the provider sets one and `models` when the route or provider has a non-empty map. `dialect` here is the route's configured dialect, since without a model there is no target ID for a `model_dialects` entry to key on.
 
 This endpoint exists because a client cannot otherwise learn what its model ID became. A model list cannot answer it: a route is a glob (`claude-*`) with a `default_model`, so the set of matching models is not enumerable. `resolve` answers the specific question for the specific ID. A statusline uses it to show the real model name behind a Claude Code alias.
 
-`/model/info` and `/v1/models` are forwarded unchanged. `/model/info` carries no `model` field, so it cannot be dialect-dispatched or resolved, and a gateway that does not implement it returns its own 404.
+There is no model-list endpoint. Every route resolves on the request body's `model` field, so `GET /v1/models` and `/model/info` return `400 request body must be valid JSON` like any other bodyless request. A client that probes for a model list - Claude Code does when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set - receives that 400, falls back to its built-in list, and reports a custom model ID as `unrecognized_model` while still sending it. The ID works; only its label is unrecognized. Use `resolve` to see what an ID becomes.
 
 ### Different mappings per profile
 
