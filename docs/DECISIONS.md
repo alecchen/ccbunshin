@@ -42,6 +42,13 @@ settings file is an ordinary key and follows the levels above" plus "Lists merge
 overriding" reads as wholesale replacement, which is wrong. Re-probe rather than trusting that
 reading.
 
+A claim from a 2026-09-21 working note that a shell export wins over a profile's `env` is wrong,
+and was re-measured on 2026-10-19: with the shell exporting `ANTHROPIC_BASE_URL=:4001` and a
+`--settings` file setting `:4002`, every request reached `:4002` and none reached `:4001`. That is
+this decision's first rule, not a counterexample to it. The note's observation about `:4444` in
+`~/.zshrc` and `:3456` in the `commandcode` profile still describes the live config, but nothing
+follows from it about precedence: a session launched with that profile uses `:3456`.
+
 ## 3. Isolation map
 
 `hooks`, `model`, `statusLine` are isolated per profile (wholesale key replacement; `hooks: {}`
