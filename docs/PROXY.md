@@ -39,6 +39,12 @@ The upstream ID resolves in this order: the route's `models`, the provider's `mo
 - `providers` (required, at least one): each needs an `upstream` absolute URL. Optional keys: `timeout` (Go duration, default `5m`), `models` (requested ID to upstream ID), `default_model` (rewrite target for a routed model with no `models` entry, translating dialects only), `effort` (default `reasoning_effort`, see [Effort](#effort)), `auth_token_env`, `auth_headers`, and `no_auth` (the provider's own credential, see [Provider credentials](#provider-credentials)), and `dialect`. A bad `dialect` is rejected at startup, so `proxy start` names the key instead of forwarding requests the wrong way.
 - `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models`, `dialect`, `model_dialects` (a `{target model: dialect}` map, keyed on the ID sent upstream), and `effort`, each overriding the provider's value.
 
+**Upgrading.** Before `bind` existed the proxy listened on every interface, so a config that
+never set it and was reached from another host stops answering off-host after the upgrade.
+The failure is a refused connection, not a wrong answer. Add `"bind": "0.0.0.0"` (or `"::"`,
+or `""`) to keep the old reach, and prefer `client_token_env` alongside it if the host is
+shared.
+
 The proxy listens on `bind:port`, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream, and without a token even when `client_token_env` is set.
 
 `dialect` says which wire format a route's upstream speaks, and there are three:
