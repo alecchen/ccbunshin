@@ -1552,20 +1552,85 @@ func profileCreate(name, source string, force bool) error {
 	}
 	return writeProfileFile(file, data)
 }
+
+// buildClaudeCommand launches claude against a profile. The profile on disk keeps its
+// ${VAR} placeholders; the file handed to Claude Code is a 0600 temporary copy with
+// the env block expanded, removed once the command finishes. Every path that starts
+// claude goes through here, so expansion cannot be forgotten at one of them.
 func buildClaudeCommand(name string, args []string) (*exec.Cmd, error) {
 	file, err := profilePath(name)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProfile(file); err != nil {
+	data, err := os.ReadFile(file)
+	if err != nil {
 		return nil, err
 	}
-	command := exec.Command("claude", append([]string{"--settings", file}, args...)...)
+	expanded, err := expandProfileData(data)
+	if err != nil {
+		return nil, fmt.Errorf("profile %s: %w", file, err)
+	}
+	settingsFile, cleanup, err := writeLaunchSettings(expanded)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.Command("claude", append([]string{"--settings", settingsFile}, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	launchCleanups = append(launchCleanups, cleanup)
 	return command, nil
 }
 
+// launchCleanups holds the temporary settings files this process has handed to claude.
+// They carry expanded secrets, so they are removed when the launch returns rather than
+// left for a later run to find.
+var launchCleanups []func()
+
+// runLaunchCleanups removes every temporary settings file. It is safe to call more
+// than once.
+func runLaunchCleanups() {
+	for _, cleanup := range launchCleanups {
+		cleanup()
+	}
+	launchCleanups = nil
+}
+
+// writeLaunchSettings writes the expanded profile to a private temporary file and
+// returns its path with a function that removes it.
+func writeLaunchSettings(data []byte) (string, func(), error) {
+	file, err := os.CreateTemp("", "ccbunshin-settings-*.json")
+	if err != nil {
+		return "", nil, err
+	}
+	name := file.Name()
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
+		os.Remove(name)
+		return "", nil, err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		os.Remove(name)
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(name)
+		return "", nil, err
+	}
+	return name, func() { os.Remove(name) }, nil
+}
+
+// encodeProfile renders a profile map as indented JSON, the same shape a profile file
+// is written in. Claude Code reads it as a settings object.
+func encodeProfile(payload map[string]any) ([]byte, error) {
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(encoded, '\n'), nil
+}
+
 func runExec(command *exec.Cmd) error {
+	defer runLaunchCleanups()
 	if err := command.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -2398,6 +2463,10 @@ func main() {
 		}
 		return
 	}
+	// claude runs in the foreground, so a Ctrl-C reaches it directly; there is no
+	// handler here, because exiting on a signal would orphan a live interactive
+	// session. A signal therefore leaves the temporary file behind, at mode 0600,
+	// which exposes it no further than the profile it was expanded from.
 	if err := runCLI(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}

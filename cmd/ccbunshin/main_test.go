@@ -746,7 +746,17 @@ func TestBuildClaudeCommandForwardsArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append([]string{"claude", "--settings", file}, forwarded...)
+	defer runLaunchCleanups()
+	// --settings names the expanded temporary copy, not the profile: the profile keeps
+	// its placeholders so a rotated secret is never frozen into it.
+	settings := command.Args[2]
+	if settings == file {
+		t.Fatal("--settings named the profile itself, want the expanded copy")
+	}
+	if _, err := os.Stat(settings); err != nil {
+		t.Fatalf("expanded settings file missing: %v", err)
+	}
+	want := append([]string{"claude", "--settings", settings}, forwarded...)
 	if !sameArgs(command.Args, want) {
 		t.Fatalf("argv = %q", command.Args)
 	}
