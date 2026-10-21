@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -28,6 +30,15 @@ type fileConfig struct {
 	Port      int                 `json:"port"`
 	Providers map[string]provider `json:"providers"`
 	Routes    []route             `json:"routes"`
+	// Bind is the address the proxy listens on. A pointer distinguishes "absent" from
+	// an explicit address, because the absent case defaults to loopback: an unset port
+	// used to listen on every interface, and a proxy that forwards a stored credential
+	// should not be reachable from the network until someone says so.
+	Bind *string `json:"bind,omitempty"`
+	// ClientTokenEnv names the environment variable holding the token every inbound
+	// request must present. Empty means the listen address is the only boundary, which
+	// is what every config written before this key expects.
+	ClientTokenEnv string `json:"client_token_env,omitempty"`
 }
 type provider struct {
 	Upstream     string            `json:"upstream"`
@@ -55,9 +66,11 @@ type route struct {
 	Effort        string            `json:"effort,omitempty"`
 }
 type loadedConfig struct {
-	port      int
-	providers map[string]loadedProvider
-	routes    []loadedRoute
+	port           int
+	bind           string
+	clientTokenEnv string
+	providers      map[string]loadedProvider
+	routes         []loadedRoute
 }
 type loadedRoute struct {
 	pattern       string
@@ -104,6 +117,13 @@ func loadConfig(filename string) (loadedConfig, error) {
 	}
 	if len(raw.Providers) == 0 {
 		return loadedConfig{}, fmt.Errorf("at least one provider is required")
+	}
+	// Absent means loopback. The explicit strings "", "0.0.0.0", and "::" all ask for
+	// every interface, which is what a config written before this key existed used to
+	// get by default; a host that wants that back says so.
+	bind := "127.0.0.1"
+	if raw.Bind != nil {
+		bind = *raw.Bind
 	}
 	providers := make(map[string]loadedProvider, len(raw.Providers))
 	for name, value := range raw.Providers {
@@ -201,7 +221,23 @@ func loadConfig(filename string) (loadedConfig, error) {
 			effort:        effort,
 		})
 	}
-	cfg := loadedConfig{port: raw.Port, providers: providers, routes: routes}
+	if raw.ClientTokenEnv != "" {
+		// The caller's credential is the proxy's own token, so forwarding it upstream
+		// would hand that token to every gateway the route table names. Each provider
+		// must therefore carry a credential of its own, or explicitly want none.
+		for name, value := range raw.Providers {
+			if value.AuthTokenEnv == "" && len(value.AuthHeaders) == 0 && !value.NoAuth {
+				return loadedConfig{}, fmt.Errorf("provider %q has no credential while client_token_env is set; add auth_token_env, auth_headers, or no_auth", name)
+			}
+		}
+	}
+	cfg := loadedConfig{
+		port:           raw.Port,
+		bind:           bind,
+		clientTokenEnv: raw.ClientTokenEnv,
+		providers:      providers,
+		routes:         routes,
+	}
 	if err := validateDialectTargets(cfg); err != nil {
 		return loadedConfig{}, err
 	}
@@ -273,6 +309,40 @@ func (c loadedConfig) providerFor(model string) (loadedProvider, bool) {
 	return loadedProvider{}, false
 }
 
+// authorized reports whether the request carries the client token, when the config
+// requires one. With no client_token_env set the listen address is the only boundary,
+// which is how every config written before this key behaved.
+//
+// The comparison is constant time so a wrong token cannot be discovered a byte at a
+// time. The token is read per request from the daemon environment, like a provider
+// credential, so a rotated value needs no restart.
+func (p *proxy) authorized(r *http.Request) bool {
+	if p.config.clientTokenEnv == "" {
+		return true
+	}
+	expected := os.Getenv(p.config.clientTokenEnv)
+	if expected == "" {
+		logf(levelError, "proxy: client_token_env %s is empty; every request will be rejected", p.config.clientTokenEnv)
+		return false
+	}
+	presented := bearerToken(r.Header.Get("Authorization"))
+	if presented == "" {
+		presented = r.Header.Get("X-Api-Key")
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) == 1
+}
+
+// bearerToken returns the token from an Authorization value, accepting the scheme
+// case-insensitively so a client that writes "bearer" still authenticates. A value
+// with no scheme is returned as it is.
+func bearerToken(value string) string {
+	const scheme = "bearer "
+	if len(value) > len(scheme) && strings.EqualFold(value[:len(scheme)], scheme) {
+		return strings.TrimSpace(value[len(scheme):])
+	}
+	return strings.TrimSpace(value)
+}
+
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -280,9 +350,22 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 		return
 	}
+	// The gate sits above every other branch, /ccbunshin/resolve included: that
+	// endpoint publishes the whole route table, upstream URLs and all.
+	if !p.authorized(r) {
+		logf(levelWarn, "proxy: %s %s from %s failed: rejected, client token missing or wrong", r.Method, r.URL.RequestURI(), r.RemoteAddr)
+		writeTranslatedError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy token", "")
+		return
+	}
 	if r.URL.Path == "/ccbunshin/resolve" {
 		p.serveResolve(w, r)
 		return
+	}
+	if p.config.clientTokenEnv != "" {
+		// The caller's credential authenticated it to the proxy, not to any upstream.
+		// Forwarding it would hand the proxy token to every gateway the routes name.
+		r.Header.Del("Authorization")
+		r.Header.Del("X-Api-Key")
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -879,14 +962,14 @@ func runServer(ctx context.Context, cfg loadedConfig) error {
 		return err
 	}
 	logThreshold = level
-	server := &http.Server{Addr: ":" + strconv.Itoa(cfg.port), Handler: &proxy{config: cfg, client: &http.Client{}}}
+	server := &http.Server{Addr: net.JoinHostPort(cfg.bind, strconv.Itoa(cfg.port)), Handler: &proxy{config: cfg, client: &http.Client{}}}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	logf(levelInfo, "proxy listening on port %d (providers=%d routes=%d log=%s)", cfg.port, len(cfg.providers), len(cfg.routes), level)
+	logf(levelInfo, "proxy listening on %s:%d (providers=%d routes=%d log=%s auth=%t)", cfg.bind, cfg.port, len(cfg.providers), len(cfg.routes), level, cfg.clientTokenEnv != "")
 	err = server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		logf(levelInfo, "proxy stopped")
