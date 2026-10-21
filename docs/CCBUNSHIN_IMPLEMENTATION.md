@@ -214,7 +214,7 @@ The translation deliberately never emits `reasoning_effort`. Deriving it from An
 
 The daemon logs through a level threshold set by `CCBUNSHIN_LOG`: `debug`, `info` (the default), `warn`, `error`. A line is written when its own level is at or above the threshold. `info` carries one line per request (requested and target model, provider, dialect, status, response bytes, elapsed time) plus startup and shutdown; `warn` carries requests the proxy itself rejects and reasoning dropped mid-stream; `error` carries upstream failures, streams cut short after their headers were sent, and any request answered 5xx; `debug` adds the routing decision, the upstream URL, and per-stream upstream usage including the cache hit count. An unrecognized value fails `proxy start` rather than logging nothing, and the CLI reads the same variable so a typo fails before a daemon is spawned. Credentials are never logged and URLs are redacted; no request or response body is written at any level. The startup line names the provider and route counts and the active level. Thresholding lives in `log.go`; the call sites are at the request path's decision points in `main.go` and `stream.go`.
 
-See `examples/proxy.json` and the "Model routing" section of `README.md`. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
+See `examples/proxy.json` and `docs/PROXY.md` for the proxy reference. Configure the file with `CCBUNSHIN_PROXY_CONFIG`.
 
 The requirements doc describes the custom proxy that maps Claude Code requests to the FREE and PAID gateways while keeping LeanCTX responsible only for context optimization.
 

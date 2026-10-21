@@ -52,9 +52,14 @@ scripts; `install.sh` and `.github/workflows/build.yml` the release path. There 
   script-indirection scan, and the required-reviewer GitHub environment, with what each layer
   catches and what it misses. Read before changing publishing/release setup, and before trusting any
   claim that a gate "covers all git push operations".
-- `README.md` - the whole user documentation: install, profiles, commands, shell integration and
-  completion, the proxy and its `proxy.json` keys, systemd, and build/verify. `cmd/ccbunshin/README.md`
+- `README.md` - the user documentation for everything except the proxy: install, profiles,
+  commands, shell integration and completion, systemd, and build/verify. `cmd/ccbunshin/README.md`
   is a pointer stub into it, so older references still resolve.
+- `docs/PROXY.md` - the proxy reference: every `proxy.json` key, route and model-rewrite rules,
+  the lifecycle commands, log levels, the three dialects, `effort`, per-provider credentials,
+  inbound authentication, and `/ccbunshin/resolve`. It was split out of `README.md` once the
+  proxy section passed half the file. Do not duplicate its content back into the README; link
+  to it.
 - `docs/COMPATIBILITY_REVIEW.md` - what to re-check before a release; maintainer-facing, and
   deliberately not in the README.
 
