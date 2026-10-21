@@ -2222,12 +2222,14 @@ is used. --force overwrites an existing profile.
 	case "launch":
 		return `usage: ccbunshin launch [<name>] [claude args...]
 
-Run "claude --settings ~/.claude-profiles/<name>.json". Extra arguments are
-forwarded to Claude unchanged and its exit status is returned. With no name,
-use the nearest .ccbunshin-profile marker in this directory or a parent, then
-the global profile; an explicit name takes precedence. The name "global" is
-reserved: it selects the global profile rather than a profile file named
-global.json.
+Run claude against ~/.claude-profiles/<name>.json, expanded into a private
+temporary settings file first: a profile may name environment variables in its
+env block, and Claude Code would otherwise read the names literally. Extra
+arguments are forwarded to Claude unchanged and its exit status is returned.
+With no name, use the nearest .ccbunshin-profile marker in this directory or a
+parent, then the global profile; an explicit name takes precedence. The name
+"global" is reserved: it selects the global profile rather than a profile file
+named global.json.
 `, true
 	case "local":
 		return `usage: ccbunshin local [<name>|--unset]

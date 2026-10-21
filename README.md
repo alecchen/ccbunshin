@@ -13,6 +13,8 @@ The whole program is one dependency-free Go binary in `cmd/ccbunshin`. It manage
   - [Proxy lifecycle](#proxy-lifecycle)
   - [Log severity](#log-severity)
   - [Translating providers](#translating-providers)
+  - [Inbound authentication](#inbound-authentication)
+  - [Environment variables in a profile](#environment-variables-in-a-profile)
   - [Provider credentials](#provider-credentials)
   - [Resolving a model ID](#resolving-a-model-id)
   - [Different mappings per profile](#different-mappings-per-profile)
@@ -122,11 +124,13 @@ Launch a profile explicitly:
 ccbunshin launch provider1
 ```
 
-This runs Claude Code with the profile settings file:
+This runs Claude Code with the profile's settings:
 
 ```sh
 claude --settings ~/.claude-profiles/provider1.json
 ```
+
+The file named by `--settings` is an expanded temporary copy of the profile, not the profile itself. See [Environment variables in a profile](#environment-variables-in-a-profile).
 
 Extra arguments are forwarded to Claude unchanged, at the argument-vector level, with no option allowlist:
 
@@ -303,10 +307,12 @@ The upstream ID resolves in this order: the route's `models`, the provider's `mo
 `proxy.json` keys:
 
 - `port` (required, 1-65535): the port the proxy listens on.
+- `bind` (optional, default `127.0.0.1`): the address the proxy listens on. Loopback is the default because a proxy that forwards a stored credential should not be reachable from the network unless someone says so. Set `"0.0.0.0"` (or `"::"`, or `""`) to listen on every interface, which is what a config written before this key existed got.
+- `client_token_env` (optional): the name of an environment variable holding a token every inbound request must present, in `Authorization: Bearer` or `x-api-key`. See [Inbound authentication](#inbound-authentication).
 - `providers` (required, at least one): each provider needs an `upstream` absolute URL. Optional `timeout` is a Go duration string (default `5m`); optional `models` maps a requested model ID to the ID sent upstream. Optional `default_model` is the rewrite target for any routed model with no explicit `models` entry, for a translating dialect only. Optional `effort` is the `reasoning_effort` applied when the caller states none - see below. Optional `auth_token_env`, `auth_headers`, and `no_auth` give a provider its own credential - see [Provider credentials](#provider-credentials). Optional `dialect` selects the wire format: `anthropic` (the default) forwards the request unchanged; `openai-chat` translates an Anthropic request onto an OpenAI-compatible `/chat/completions` call, and translates the response back; `systemone` forwards a System One decision request unchanged onto `/systemone`. Those are the only three values. A bad value is rejected at startup, so `proxy start` fails and names the key rather than forwarding requests the wrong way.
 - `routes` (required): ordered list of `{pattern, provider}`. `pattern` matches the request model: no wildcard means one exact model, `*` matches any run of characters (for example `"claude-*"`). `provider` must name a provider above. Duplicate exact patterns are rejected. A route may also carry `models` (overriding the provider's map), `dialect` (overriding the provider's), `model_dialects` (a `{target model: dialect}` map overriding both, keyed on the ID sent upstream), and `effort` (overriding the provider's).
 
-The proxy listens on the configured port, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream.
+The proxy listens on `bind:port`, reads the request model, applies the ordered glob routes (first match wins), resolves the target model and dialect, and forwards the request. It returns HTTP 400 when no route matches. `/healthz` returns HTTP 200 without contacting an upstream, and without a token even when `client_token_env` is set.
 
 `dialect` says which wire format a route's upstream speaks, and there are three:
 
@@ -486,6 +492,59 @@ The caller's own path is replaced by `/systemone`, so the path in the example is
 `systemone` requests go through the same route table as everything else. The model ID passes through unless a `models` entry maps it, in which case the body's `model` is rewritten. `default_model` does not apply: it gives a translated chat upstream an ID it accepts, and a decision caller already sends a decision model. `effort` does not apply either.
 
 Jev never streams, and the proxy does not add a stream: a `stream` field in the body is the upstream's to interpret. Upstream errors are passed back as they arrived, at the upstream's status.
+
+### Inbound authentication
+
+Without `client_token_env`, the listen address is the only boundary: anything that can reach the port can spend whatever credential a provider holds. That is fine on a single-user machine bound to loopback, and wrong on a host other people can log into. Behind ssh, loopback is no boundary at all, because every user on the box can reach `127.0.0.1` too.
+
+`client_token_env` names an environment variable holding a token that every inbound request must present:
+
+```json
+{
+  "port": 3456,
+  "bind": "127.0.0.1",
+  "client_token_env": "CCBUNSHIN_PROXY_TOKEN",
+  "providers": {
+    "gateway": {
+      "upstream": "https://gateway.example.invalid",
+      "auth_token_env": "GATEWAY_TOKEN"
+    }
+  },
+  "routes": [{"pattern": "claude-*", "provider": "gateway"}]
+}
+```
+
+The client sends the token in `Authorization: Bearer` or `x-api-key`, so a profile whose `ANTHROPIC_AUTH_TOKEN` is the **value** of `CCBUNSHIN_PROXY_TOKEN` works unchanged. `/healthz` stays open, because a liveness check should not need a secret. Everything else is gated, `/ccbunshin/resolve` included, since it publishes the route table.
+
+Four rules follow:
+
+- The caller's credential authenticated it to the proxy, not to any upstream, so it is removed before every forwarded request. Otherwise the proxy token would be handed to every gateway the routes name.
+- Because of that, every provider must carry its own credential (`auth_token_env` or `auth_headers`) or explicitly want none (`no_auth`). A config that leaves one provider with no auth key is refused at startup, with the provider named.
+- The token is compared in constant time and read per request, so a rotated value needs no restart.
+- An empty or unexported variable rejects every request rather than opening the gate, and the daemon logs that at `error`.
+
+The token is the value, never the variable name. `"ANTHROPIC_AUTH_TOKEN": "CCBUNSHIN_PROXY_TOKEN"` sends the letters, and every request is rejected.
+
+### Environment variables in a profile
+
+Claude Code treats a settings `env` value as a literal, so `"ANTHROPIC_AUTH_TOKEN": "$TOKEN"` sends that text on the wire. `ccbunshin launch` and the project-aware wrapper expand the profile's `env` block before handing it to Claude Code, so a profile can keep its secrets out of the file:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+    "ANTHROPIC_AUTH_TOKEN": "${CCBUNSHIN_PROXY_TOKEN}"
+  }
+}
+```
+
+Three rules:
+
+- Only `env` is expanded. Other top-level keys, including `hooks` and `permissions`, are passed through untouched, because a dollar sign there belongs to Claude Code or to a shell.
+- An unset variable fails the launch and names both the variable and the key. Expanding to an empty string would send a blank credential, which reads as a gateway fault instead of a profile mistake.
+- `$$` is a literal dollar sign. A dollar sign that starts no valid name, as in `cost is $100`, is left alone.
+
+The profile file is never rewritten. Expansion happens on a private temporary copy, created with mode 0600 and removed when the launch returns. A rotated secret therefore takes effect on the next launch with no edit, and a profile that names variables stays safe to copy and share.
 
 ### Provider credentials
 

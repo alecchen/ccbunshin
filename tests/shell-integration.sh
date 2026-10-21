@@ -23,12 +23,28 @@ mkdir -p "$BIN" "$WORK/profiles"
 go -C "$ROOT/cmd/ccbunshin" build -o "$BIN/ccbunshin" .
 
 # Fake claude: appends its argv as one line per invocation and honors CLAUDE_EXIT.
+# It also prints the content of the settings file it was handed, so the test asserts
+# which profile arrived by what the file says rather than by a path that changes on
+# every launch.
 cat > "$BIN/claude" <<'EOF'
 #!/bin/sh
 {
   printf 'argv:'
-  for a in "$@"; do printf ' [%s]' "$a"; done
+  for a in "$@"; do
+    case "$a" in
+      */ccbunshin-settings-*) printf ' [ccbunshin-settings-*]' ;;
+      *) printf ' [%s]' "$a" ;;
+    esac
+  done
   printf '\n'
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--settings" ] && [ -f "$a" ]; then
+      tr -d ' \n' < "$a"
+      printf '\n'
+    fi
+    prev=$a
+  done
 } >> "$CCBUNSHIN_FAKE_LOG"
 exit "${CLAUDE_EXIT:-0}"
 EOF
@@ -47,21 +63,28 @@ SET1="$WORK/profiles/provider1.json"
 SET2="$WORK/profiles/provider2.json"
 export PLAIN PROJ1 PROJ2 SET1 SET2
 
+# The settings marker lines the fake claude matches on, one per profile.
+M1='{"marker":"provider1"}'
+M2='{"marker":"provider2"}'
+export M1 M2
+
 mkdir -p "$PROJ1/sub/deep" "$PROJ2" "$PLAIN"
 printf 'provider1\n' > "$PROJ1/.ccbunshin-profile"
 printf 'provider2\n' > "$PROJ2/.ccbunshin-profile"
-printf '{}\n' > "$SET1"
-printf '{}\n' > "$SET2"
+printf '{"marker":"provider1"}\n' > "$SET1"
+printf '{"marker":"provider2"}\n' > "$SET2"
 
-# Expected argv lines, one per claude invocation below, in order.
+# Expected argv lines, one per claude invocation below, in order. The settings path is
+# compared by name only, because every launch gets a fresh temporary copy; which
+# profile arrived is asserted by its content.
 expected_file() {
   {
     printf 'argv: [-p] [hello world]\n'
-    printf 'argv: [--settings] [%s] [--model] [sonnet] [--resume] [abc] [-p] [fix this]\n' "$SET1"
-    printf 'argv: [--settings] [%s]\n' "$SET2"
-    printf 'argv: [--settings] [%s] [--settings] [foo.json]\n' "$SET2"
-    printf 'argv: [--settings] [%s] [-p] [again]\n' "$SET1"
-    printf 'argv: [--settings] [%s] [-p] [x]\n' "$SET1"
+    printf 'argv: [--settings] [ccbunshin-settings-*] [--model] [sonnet] [--resume] [abc] [-p] [fix this]\n%s\n' "$M1"
+    printf 'argv: [--settings] [ccbunshin-settings-*]\n%s\n' "$M2"
+    printf 'argv: [--settings] [ccbunshin-settings-*] [--settings] [foo.json]\n%s\n' "$M2"
+    printf 'argv: [--settings] [ccbunshin-settings-*] [-p] [again]\n%s\n' "$M1"
+    printf 'argv: [--settings] [ccbunshin-settings-*] [-p] [x]\n%s\n' "$M1"
   } > "$WORK/expected"
 }
 
@@ -132,7 +155,7 @@ cd "$PROJ1"
 claude -p "again"
 ' "$shell")
   "$shell" $flags "$code" || { echo "FAILED: $shell alias-shadow scenario exited $?"; return 1; }
-  printf 'argv: [--settings] [%s] [-p] [again]\n' "$SET1" > "$WORK/expected"
+  printf 'argv: [--settings] [ccbunshin-settings-*] [-p] [again]\n%s\n' "$M1" > "$WORK/expected"
   if ! diff -u "$WORK/expected" "$LOG"; then
     echo "FAILED: $shell wrapper did not survive a pre-existing claude alias"
     return 1
@@ -171,7 +194,7 @@ run_global_fallback() {
   : > "$LOG"
   printf 'provider1\n' > "$CCBUNSHIN_PROFILES_DIR/global"
   "$shell" $flags "$code" || { echo "FAILED: $shell set-global scenario exited $?"; return 1; }
-  printf 'argv: [--settings] [%s] [-p] [no global]\n' "$SET1" > "$WORK/expected"
+  printf 'argv: [--settings] [ccbunshin-settings-*] [-p] [no global]\n%s\n' "$M1" > "$WORK/expected"
   if ! diff -u "$WORK/expected" "$LOG"; then
     echo "FAILED: $shell ignored the global selection outside a project"
     return 1

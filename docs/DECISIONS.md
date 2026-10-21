@@ -396,3 +396,74 @@ Serving a list is technically easy (`ServeHTTP` already branches before reading 
 `/ccbunshin/resolve` answers the question discovery is meant to answer, for one ID at a time and
 from the same route table the request path uses. A future list endpoint would have to publish only
 explicit map keys and exact patterns, never `default_model` fallbacks, to be safe.
+
+## 17. The proxy can require an inbound token, and listens on loopback by default
+
+Decision 15 let a provider hold a credential the daemon reads from its environment. That
+credential is spendable by anything that can reach the port, and the port was open on every
+interface: `runServer` built its address as `":" + port`. On a single-user machine behind no
+network that is invisible. On a host other users can log into it is not, because loopback is
+no boundary against someone who is already on the box. Binding to `127.0.0.1` narrows who
+reaches the port from the network to the host. It does not separate two users of the same host,
+so it is hardening, not the fix.
+
+Two top-level keys, both optional:
+
+- `client_token_env` names an environment variable holding a token every inbound request must
+  present, in `Authorization: Bearer` or `x-api-key`. `subtle.ConstantTimeCompare`, read per
+  request, so a wrong token is not discoverable a byte at a time and a rotated value needs no
+  restart.
+- `bind` is the listen address, default `127.0.0.1`.
+
+**The caller's credential is stripped once `client_token_env` is set.** The token authenticated
+the caller to the proxy, so forwarding it would hand the proxy token to every upstream the route
+table names. Each provider must then name its own credential or set `no_auth`, and a config that
+leaves one without is rejected at load, naming the provider. This is the same reasoning as
+decision 15's rejection of falling back to the caller's credential, applied to the inbound side.
+
+`/healthz` stays ungated so a liveness check needs no secret. `/ccbunshin/resolve` is gated: it
+publishes the entire route table, upstream URLs included, and an earlier probe read it back
+unauthenticated from a live proxy.
+
+**Compatibility, stated plainly.** The auth key is additive: a config without it behaves
+exactly as before. `bind` is not, because absent has to mean something and "every interface"
+is the behavior being fixed. It defaults to loopback, and an explicit `"0.0.0.0"`, `"::"`, or
+`""` restores the old behavior for a config that genuinely serves the network. A config that
+relied on the old default without saying so will stop answering off-host after upgrading, which
+is the intended failure: it surfaces as a connection refused rather than as a stranger spending
+the key.
+
+Rejected: gating only the request path and leaving `/ccbunshin/resolve` open (it leaks the route
+table, and splitting the gate invites a later branch above it); a shared secret in `proxy.json`
+(same reason as decision 15, the file is a template meant to be copied); per-user tokens (one
+operator, and a map of tokens buys attribution the single-user case does not need).
+
+## 18. A profile's env block is expanded at launch, never rewritten
+
+Claude Code reads a settings `env` value literally. Verified 2026-10-21 by pointing a profile at
+a local catcher with `ANTHROPIC_AUTH_TOKEN` set to `$PROBE_TOKEN` and `PROBE_TOKEN` exported: the
+request carried `Bearer $PROBE_TOKEN`. Neither Claude Code nor ccbunshin expanded it, so a
+profile could not name a secret without also containing it.
+
+`buildClaudeCommand` expands the `env` block into a temporary file and passes that as
+`--settings`. Three rules:
+
+- **Only `env`.** A dollar sign under `hooks`, `permissions`, or `statusLine` belongs to Claude
+  Code or to a shell, and rewriting it would corrupt a working profile.
+- **An unset variable is an error** naming both the key and the variable. Expanding to the empty
+  string sends a blank credential, which the upstream reports as 401 and the operator reads as a
+  gateway fault.
+- **`$$` escapes a literal dollar sign.** A dollar that starts no valid name, such as `$100`,
+  stays literal, which is why the name syntax is checked rather than every `$` treated as an
+  expansion.
+
+The profile file is never rewritten. Decision 2 makes a settings `env` block beat the process
+environment, so a value written back would freeze a rotated secret until someone edited the file;
+expanding a copy means the next launch picks up the current value. The copy is mode 0600 and is
+removed when the launch returns. A signal that kills ccbunshin but not claude leaves it behind,
+which exposes it no further than the profile it was expanded from, already mode 0600.
+
+Rejected: rewriting the profile in place (freezes the secret, and puts it in a file meant to be
+shareable); a separate `ccbunshin materialize` command the operator runs and passes to `claude`
+(two commands to remember, and the wrapper would still have to do it); expanding every string in
+the profile (see the first rule).
