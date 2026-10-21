@@ -5,3 +5,7 @@ cmd/ccbunshin/ccbunshin
 # Cross-compiled release binaries, built at the repo root.
 /ccbunshin-linux-amd64
 /ccbunshin-linux-arm64
+
+# Per-machine permission grants, rewritten as approvals change. The skill beside
+# it is tracked on purpose: it documents how to verify this repo's binary.
+.claude/settings.local.json
