@@ -1120,7 +1120,7 @@ func TestProfileWriteIsAtomic(t *testing.T) {
 				return
 			default:
 			}
-			if err := checkProfileFiles([]string{file}); err != nil {
+			if err := parseProfileFile(file); err != nil {
 				done <- err
 				return
 			}
@@ -2236,4 +2236,15 @@ func TestLoadConfigRejectsAuthHeadersWithOtherAuthKeys(t *testing.T) {
 			t.Errorf("loadConfig accepted %s alongside auth_headers", body)
 		}
 	}
+}
+
+// parseProfileFile reads and parses a profile, which is what an atomic write must
+// always leave readable.
+func parseProfileFile(file string) error {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	_, err = parseProfile(data)
+	return err
 }

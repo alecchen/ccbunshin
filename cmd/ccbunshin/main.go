@@ -1362,23 +1362,6 @@ func parseProfile(data []byte) (map[string]any, error) {
 	return payload, nil
 }
 
-// checkProfileFiles reports a profile that is no longer a settings object, in file
-// order, so a listing names every broken profile rather than only the first. A
-// launch does not need it: buildClaudeCommand parses the profile it expands, and
-// fails with the same message there.
-func checkProfileFiles(files []string) error {
-	for _, file := range files {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		if _, err := parseProfile(data); err != nil {
-			return fmt.Errorf("profile %s is not a settings object: %w", file, err)
-		}
-	}
-	return nil
-}
-
 // writeProfileFile replaces a profile in one step, so a reader sees either the
 // old file or the new one and never a truncated write. A login reads profiles
 // while they are still being written, and a half-written file reads as invalid.

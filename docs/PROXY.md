@@ -349,6 +349,15 @@ Each entry has `pattern`, `provider`, `dialect`, and `upstream`, plus `default_m
 
 This endpoint exists because a client cannot otherwise learn what its model ID became. A model list cannot answer it: a route is a glob (`claude-*`) with a `default_model`, so the set of matching models is not enumerable. `resolve` answers the specific question for the specific ID. A statusline uses it to show the real model name behind a Claude Code alias.
 
+With `client_token_env` set, `resolve` needs the token like every other path. A statusline or script that polls it must send the same value, which is one more place to wire it:
+
+```sh
+curl -s -H "Authorization: Bearer $CCBUNSHIN_PROXY_TOKEN" \
+  'http://127.0.0.1:3456/ccbunshin/resolve?model=claude-opus-5'
+```
+
+If the token is a burden there, that is a reason to leave `client_token_env` unset on a single-user loopback machine, where the listen address already is the boundary.
+
 There is no model-list endpoint. Every route resolves on the request body's `model` field, so `GET /v1/models` and `/model/info` return `400 request body must be valid JSON` like any other bodyless request. A client that probes for a model list - Claude Code does when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set - receives that 400, falls back to its built-in list, and reports a custom model ID as `unrecognized_model` while still sending it. The ID works; only its label is unrecognized. Use `resolve` to see what an ID becomes.
 
 ## Different mappings per profile
