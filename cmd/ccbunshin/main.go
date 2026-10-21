@@ -1362,16 +1362,19 @@ func parseProfile(data []byte) (map[string]any, error) {
 	return payload, nil
 }
 
-// checkProfile re-reads a profile just before it is handed to Claude Code, so a
-// file that is not a settings object is reported here rather than in Claude
-// Code's settings dialog. It checks shape only; Claude Code validates the keys.
-func checkProfile(file string) error {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	if _, err := parseProfile(data); err != nil {
-		return fmt.Errorf("profile %s is not a settings object: %w", file, err)
+// checkProfileFiles reports a profile that is no longer a settings object, in file
+// order, so a listing names every broken profile rather than only the first. A
+// launch does not need it: buildClaudeCommand parses the profile it expands, and
+// fails with the same message there.
+func checkProfileFiles(files []string) error {
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if _, err := parseProfile(data); err != nil {
+			return fmt.Errorf("profile %s is not a settings object: %w", file, err)
+		}
 	}
 	return nil
 }

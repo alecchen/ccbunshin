@@ -460,8 +460,10 @@ profile could not name a secret without also containing it.
 The profile file is never rewritten. Decision 2 makes a settings `env` block beat the process
 environment, so a value written back would freeze a rotated secret until someone edited the file;
 expanding a copy means the next launch picks up the current value. The copy is mode 0600 and is
-removed when the launch returns. A signal that kills ccbunshin but not claude leaves it behind,
-which exposes it no further than the profile it was expanded from, already mode 0600.
+removed when the launch returns, on a non-zero exit and on an interrupt alike. That last part is
+not decoration: `os.Exit` skips a deferred cleanup, and the copy is the only plaintext copy of the
+secret, since the profile holds placeholders. A first draft argued the leftover exposed nothing
+beyond the profile, which got it backwards.
 
 Rejected: rewriting the profile in place (freezes the secret, and puts it in a file meant to be
 shareable); a separate `ccbunshin materialize` command the operator runs and passes to `claude`

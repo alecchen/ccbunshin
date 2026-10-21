@@ -544,7 +544,7 @@ Three rules:
 - An unset variable fails the launch and names both the variable and the key. Expanding to an empty string would send a blank credential, which reads as a gateway fault instead of a profile mistake.
 - `$$` is a literal dollar sign. A dollar sign that starts no valid name, as in `cost is $100`, is left alone.
 
-The profile file is never rewritten. Expansion happens on a private temporary copy, created with mode 0600 and removed when the launch returns. A rotated secret therefore takes effect on the next launch with no edit, and a profile that names variables stays safe to copy and share.
+The profile file is never rewritten. Expansion happens on a private temporary copy, created with mode 0600 and removed when the launch returns, including when claude exits non-zero or the launch is interrupted. Until it is removed it is the only plaintext copy of the secret, since the profile holds placeholders. A rotated secret therefore takes effect on the next launch with no edit, and a profile that names variables stays safe to copy and share.
 
 ### Provider credentials
 

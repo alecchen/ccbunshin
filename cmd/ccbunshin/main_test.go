@@ -1120,7 +1120,7 @@ func TestProfileWriteIsAtomic(t *testing.T) {
 				return
 			default:
 			}
-			if err := checkProfile(file); err != nil {
+			if err := checkProfileFiles([]string{file}); err != nil {
 				done <- err
 				return
 			}
