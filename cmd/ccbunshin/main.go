@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -101,6 +103,38 @@ type loadedProvider struct {
 type proxy struct {
 	config loadedConfig
 	client *http.Client
+	// warnEmptyToken keeps the "token variable is unset" line to one per process
+	// instead of one per rejected request.
+	warnEmptyToken sync.Once
+}
+
+// validateBind rejects a listen address that would only fail later, inside
+// ListenAndServe, with a low-level message that names nothing. The common mistake is
+// putting a port in it: "127.0.0.1:8080" joins to "127.0.0.1:8080:3456". An empty
+// address is the documented way to say every interface, so it is accepted.
+func validateBind(bind string) error {
+	if bind == "" {
+		return nil
+	}
+	if strings.TrimSpace(bind) != bind {
+		return fmt.Errorf("bind %q must not contain whitespace", bind)
+	}
+	if net.ParseIP(bind) != nil {
+		return nil
+	}
+	// A bare IPv6 literal has colons but is not a port; net.ParseIP above already
+	// accepted those, so any colon left here is a port or a malformed address.
+	if strings.ContainsRune(bind, ':') {
+		return fmt.Errorf("bind %q must be a host or IP address, without a port", bind)
+	}
+	for i := 0; i < len(bind); i++ {
+		c := bind[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == '_' {
+			continue
+		}
+		return fmt.Errorf("bind %q must be a host or IP address", bind)
+	}
+	return nil
 }
 
 func loadConfig(filename string) (loadedConfig, error) {
@@ -124,6 +158,9 @@ func loadConfig(filename string) (loadedConfig, error) {
 	bind := "127.0.0.1"
 	if raw.Bind != nil {
 		bind = *raw.Bind
+	}
+	if err := validateBind(bind); err != nil {
+		return loadedConfig{}, err
 	}
 	providers := make(map[string]loadedProvider, len(raw.Providers))
 	for name, value := range raw.Providers {
@@ -322,14 +359,22 @@ func (p *proxy) authorized(r *http.Request) bool {
 	}
 	expected := os.Getenv(p.config.clientTokenEnv)
 	if expected == "" {
-		logf(levelError, "proxy: client_token_env %s is empty; every request will be rejected", p.config.clientTokenEnv)
+		// Once, not per request: a missing variable rejects everything, and a line per
+		// rejected request would bury whatever else the log is trying to say.
+		p.warnEmptyToken.Do(func() {
+			logf(levelError, "proxy: client_token_env %s is empty; every request will be rejected", p.config.clientTokenEnv)
+		})
 		return false
 	}
 	presented := bearerToken(r.Header.Get("Authorization"))
 	if presented == "" {
 		presented = r.Header.Get("X-Api-Key")
 	}
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) == 1
+	// Digests, because ConstantTimeCompare returns at once when the lengths differ, so
+	// comparing the tokens themselves would still reveal the token's length.
+	presentedDigest := sha256.Sum256([]byte(presented))
+	expectedDigest := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(presentedDigest[:], expectedDigest[:]) == 1
 }
 
 // bearerToken returns the token from an Authorization value, accepting the scheme
@@ -1301,9 +1346,14 @@ func profileModel(file string) string {
 // parseProfile decodes a profile the way Claude Code does: the top level has to
 // be a JSON object. json.Valid alone accepts null and [], both of which Claude
 // Code rejects with its settings dialog instead of a message naming the file.
+// parseProfile decodes a profile into a generic map. Numbers are kept as literals
+// rather than float64, because the same map is re-encoded when a launch expands the
+// env block, and a float64 round-trip silently changes a large integer.
 func parseProfile(data []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := decoder.Decode(&payload); err != nil {
 		return nil, err
 	}
 	if payload == nil {
@@ -1717,6 +1767,9 @@ func runExec(command *exec.Cmd) error {
 	if err := command.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
+			// os.Exit skips the deferred cleanup, and the temporary settings file holds
+			// the expanded secret, so a non-zero exit would leave it behind.
+			runLaunchCleanups()
 			os.Exit(exit.ExitCode())
 		}
 		return err
@@ -2548,10 +2601,17 @@ func main() {
 		}
 		return
 	}
-	// claude runs in the foreground, so a Ctrl-C reaches it directly; there is no
-	// handler here, because exiting on a signal would orphan a live interactive
-	// session. A signal therefore leaves the temporary file behind, at mode 0600,
-	// which exposes it no further than the profile it was expanded from.
+	// claude runs in the foreground and gets a Ctrl-C directly, from the terminal or
+	// forwarded below. This handler exists so ccbunshin does not die first and skip the
+	// cleanup of the temporary settings file, which holds the only plaintext copy of an
+	// expanded secret: the profile itself holds placeholders. The file is removed once
+	// the launch returns, and a signal that ends the launch early is that return.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-interrupts
+		runLaunchCleanups()
+	}()
 	if err := runCLI(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
